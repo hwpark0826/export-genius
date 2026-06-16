@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "Export Genius Helper",
+  "version": "0.1.15",
+  "description": "Small helper to inspect and automate the current Export Genius page.",
+  "permissions": ["activeTab", "scripting"],
+  "host_permissions": ["https://dashboard.exportgenius.in/*"],
+  "action": {
+    "default_title": "Export Genius Helper",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://dashboard.exportgenius.in/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
