@@ -1,8 +1,41 @@
 (() => {
-  const HELPER_VERSION = "v2026-06-16-no-tab-reclick";
+  const HELPER_VERSION = "v2026-06-17-pagination-resume-paths";
+  const COLLECTION_STATE_KEY = "exportGeniusQualifiedCollectionState";
+  const LOCAL_GUI_URL = "http://127.0.0.1:8765";
 
   function textOf(element) {
     return (element.innerText || element.textContent || "").replace(/\s+/g, " ").trim();
+  }
+
+  function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  async function waitUntil(predicate, timeoutMs = 20000, intervalMs = 300, settleMs = 0) {
+    const started = Date.now();
+
+    while (Date.now() - started < timeoutMs) {
+      const value = predicate();
+      if (value) {
+        if (settleMs > 0) {
+          await sleep(settleMs);
+        }
+        return value;
+      }
+
+      await sleep(intervalMs);
+    }
+
+    return null;
+  }
+
+  function visibleElement(element) {
+    if (!element || isHelperElement(element)) {
+      return false;
+    }
+
+    const rect = element.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
   }
 
   function describeElement(element) {
@@ -116,7 +149,7 @@
   }
 
   function normalizeText(value) {
-    return value.toLowerCase().replace(/[\s\-_–—]+/g, "");
+    return String(value || "").toLowerCase().replace(/[\s\-_/+.,:()[\]{}–—]+/g, "");
   }
 
   function matchesExactText(element, expectedTexts) {
@@ -872,10 +905,10 @@
     }
 
     dispatchValue(detailInput, hsCode);
-    await new Promise((resolve) => setTimeout(resolve, 2000));
+    await sleep(700);
 
     const filterButton = clickExactControl("Filter", "button, [role='button']");
-    await new Promise((resolve) => setTimeout(resolve, 2000));
+    await sleep(700);
 
     return {
       ok: filterResult.ok && conditionResult.ok && filterButton.ok,
@@ -887,6 +920,34 @@
   }
 
   async function applyTotalValueRange(minValue, maxValue) {
+    const existingApplied = Array.from(document.querySelectorAll("div, span, p"))
+      .find((element) => {
+        if (isHelperElement(element)) {
+          return false;
+        }
+
+        const rect = element.getBoundingClientRect();
+        const text = normalizeText(textOf(element));
+        return rect.width > 0 && rect.height > 0 && rect.left < 430 &&
+          text.includes("totalvalueusd") &&
+          text.includes(String(minValue).replace(/\D/g, "")) &&
+          text.includes(String(maxValue).replace(/\D/g, ""));
+      });
+
+    if (existingApplied) {
+      return {
+        ok: true,
+        alreadyApplied: true,
+        row: describeElement(existingApplied)
+      };
+    }
+
+    const modify = findVisibleByText(["modify your data"]);
+    if (modify) {
+      clickElement(modify);
+      await sleep(700);
+    }
+
     const leftPanelElements = Array.from(document.querySelectorAll("div, section, aside"))
       .filter((element) => {
         if (isHelperElement(element)) {
@@ -951,8 +1012,10 @@
 
         const rect = element.getBoundingClientRect();
         const text = textOf(element).trim();
+        const aria = normalizeText(element.getAttribute("aria-label") || "");
         return rect.width > 0 && rect.height > 0 &&
           rect.left > rowRect.left + rowRect.width * 0.65 &&
+          !aria.includes("delete") &&
           (text === "+" || text === "" || normalizeText(text).includes("add"));
       })
       .sort((a, b) => b.getBoundingClientRect().left - a.getBoundingClientRect().left)[0];
@@ -960,25 +1023,32 @@
     clickAt(plus || row, 0.92);
     await new Promise((resolve) => setTimeout(resolve, 800));
 
-    const expandedRect = row.getBoundingClientRect();
-    const inputs = Array.from(document.querySelectorAll("input"))
-      .filter((element) => {
-        if (isHelperElement(element) || element.disabled || element.readOnly) {
-          return false;
-        }
+    const findTotalValueInputs = () => {
+      const expandedRect = row.getBoundingClientRect();
+      return Array.from(document.querySelectorAll("input"))
+        .filter((element) => {
+          if (isHelperElement(element) || element.disabled || element.readOnly) {
+            return false;
+          }
 
-        const rect = element.getBoundingClientRect();
-        return rect.width > 0 && rect.height > 0 &&
-          rect.left < 420 &&
-          rect.top > expandedRect.top &&
-          rect.top < expandedRect.top + 320;
-      })
-      .sort((a, b) => {
-        const aRect = a.getBoundingClientRect();
-        const bRect = b.getBoundingClientRect();
-        return aRect.top - bRect.top || aRect.left - bRect.left;
-      })
-      .slice(0, 2);
+          const rect = element.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0 &&
+            rect.left < 520 &&
+            rect.top > expandedRect.top - 20 &&
+            rect.top < expandedRect.top + 420;
+        })
+        .sort((a, b) => {
+          const aRect = a.getBoundingClientRect();
+          const bRect = b.getBoundingClientRect();
+          return aRect.top - bRect.top || aRect.left - bRect.left;
+        })
+        .slice(0, 2);
+    };
+
+    const inputs = await waitUntil(() => {
+      const found = findTotalValueInputs();
+      return found.length >= 2 ? found : null;
+    }, 6000, 300, 300) || [];
 
     if (inputs.length < 2) {
       return {
@@ -1013,14 +1083,15 @@
     }
 
     clickElement(addButton);
-    await new Promise((resolve) => setTimeout(resolve, 700));
+    const resultsStable = await waitForResultsStable(12000);
 
     return {
       ok: true,
       min: minValue,
       max: maxValue,
       inputs: inputs.map(describeElement),
-      addButton: describeElement(addButton)
+      addButton: describeElement(addButton),
+      resultsStable
     };
   }
 
@@ -1077,13 +1148,16 @@
         directCheckbox.dispatchEvent(new Event("change", { bubbles: true }));
       }
 
+      const resultsStable = await waitForResultsStable(12000);
+
       return {
         ok: true,
         method: "checkbox",
         checked: directCheckbox.checked,
         control: describeElement(directCheckbox),
         switchLabel: describeElement(switchLabel),
-        slider: describeElement(slider)
+        slider: describeElement(slider),
+        resultsStable
       };
     }
 
@@ -1123,10 +1197,13 @@
         clickElement(checkbox);
       }
 
+      const resultsStable = await waitForResultsStable(12000);
+
       return {
         ok: true,
         alreadyChecked,
-        control: describeElement(checkbox)
+        control: describeElement(checkbox),
+        resultsStable
       };
     }
 
@@ -1141,25 +1218,34 @@
         y: switchY
       });
 
+      const resultsStable = await waitForResultsStable(12000);
+
       return {
         ok: true,
-        clickedSwitch: describeElement(switchTarget)
+        clickedSwitch: describeElement(switchTarget),
+        resultsStable
       };
     }
 
     clickElement(label);
+    const resultsStable = await waitForResultsStable(12000);
 
     return {
       ok: true,
-      clickedLabel: describeElement(label)
+      clickedLabel: describeElement(label),
+      resultsStable
     };
   }
 
   async function selectImportersTab() {
     const result = clickExactControl("Importers", "button, a, [role='button']");
-    await new Promise((resolve) => setTimeout(resolve, 700));
+    const resultsStable = result.ok ? await waitForResultsStable(12000) : { ok: false, reason: "Importers tab not clicked" };
 
-    return result;
+    return {
+      ...result,
+      ok: result.ok,
+      resultsStable
+    };
   }
 
   async function applyUserCriteria(options) {
@@ -1168,17 +1254,22 @@
     const maxValue = String(options.maxValue || "5000000").trim();
 
     const dates = setLastOneYearDates();
-    await new Promise((resolve) => setTimeout(resolve, 2000));
+    await sleep(700);
     const hsFilter = await applyHsCodeFilter(hsCode);
-    await new Promise((resolve) => setTimeout(resolve, 2000));
+    await sleep(700);
     const applyHs = clickExactControl("Apply", "button, [role='button']");
-    await new Promise((resolve) => setTimeout(resolve, 8000));
+    const applyResultsStable = applyHs.ok ? await waitForResultsStable(12000) : { ok: false, reason: "Apply button not clicked" };
 
     const importersTab = await selectImportersTab();
-    await new Promise((resolve) => setTimeout(resolve, 2000));
-    const totalValue = await applyTotalValueRange(minValue, maxValue);
-    await new Promise((resolve) => setTimeout(resolve, 2000));
+    await sleep(700);
+    let totalValue = await applyTotalValueRange(minValue, maxValue);
+    if (!totalValue.ok) {
+      await sleep(1200);
+      totalValue = await applyTotalValueRange(minValue, maxValue);
+    }
+    await sleep(700);
     const removeUnknownExporter = await enableRemoveUnknownExporter();
+    await waitForImporterCandidates(8000);
 
     return {
       ok: dates.ok && hsFilter.ok && applyHs.ok && importersTab.ok && totalValue.ok && removeUnknownExporter.ok,
@@ -1197,6 +1288,7 @@
       dates,
       hsFilter,
       applyHs,
+      applyResultsStable,
       importersTab,
       totalValue,
       removeUnknownExporter
@@ -1316,29 +1408,28 @@
   }
 
   async function waitForUrlPart(part, timeoutMs = 20000) {
-    const started = Date.now();
+    return Boolean(await waitUntil(() => location.href.includes(part), timeoutMs, 300, 1000));
+  }
 
-    while (Date.now() - started < timeoutMs) {
-      if (location.href.includes(part)) {
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-        return true;
-      }
+  async function goBackToResults(resultsUrl) {
+    history.back();
+    let ok = await waitForUrlPart("/search-results", 30000);
 
-      await new Promise((resolve) => setTimeout(resolve, 300));
+    if (!ok && resultsUrl) {
+      location.href = resultsUrl;
+      ok = await waitForUrlPart("/search-results", 30000);
     }
 
-    return false;
+    if (!ok) {
+      return false;
+    }
+
+    const candidates = await waitForImporterCandidates(20000);
+    return Boolean(candidates.length);
   }
 
-  async function goBackToResults() {
-    history.back();
-    const ok = await waitForUrlPart("/search-results", 30000);
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-    return ok;
-  }
-
-  async function goNextImporterPage() {
-    const next = Array.from(document.querySelectorAll("a, button, [role='button']"))
+  function findNextPageButton() {
+    return Array.from(document.querySelectorAll(".pagination a, .pagination button, a, button, [role='button']"))
       .filter((element) => {
         if (isHelperElement(element)) {
           return false;
@@ -1347,32 +1438,128 @@
         const rect = element.getBoundingClientRect();
         const text = normalizeText(textOf(element));
         const aria = normalizeText(element.getAttribute("aria-label") || "");
-        return rect.width > 0 && rect.height > 0 && (text === "next" || aria === "nextpage");
+        const disabled = element.getAttribute("aria-disabled") === "true" ||
+          element.closest(".disabled") ||
+          element.disabled;
+
+        return rect.width > 0 && rect.height > 0 && !disabled && (text === "next" || aria === "nextpage");
       })
       .sort((a, b) => b.getBoundingClientRect().top - a.getBoundingClientRect().top)[0];
+  }
+
+  async function goNextImporterPage() {
+    const beforeSignature = importerListSignature();
+    const next = findNextPageButton();
 
     if (!next) {
       return false;
     }
 
     clickElement(next);
-    await new Promise((resolve) => setTimeout(resolve, 2000));
-    return true;
+    const candidates = await waitUntil(() => {
+      const currentCandidates = getImporterCandidates();
+      const currentSignature = importerListSignature();
+
+      if (currentCandidates.length && currentSignature && currentSignature !== beforeSignature && !pageLooksBusy()) {
+        return currentCandidates;
+      }
+
+      return null;
+    }, 25000, 600, 1000);
+
+    return Boolean(candidates.length);
+  }
+
+  async function waitForImporterResultsReady(timeoutMs = 25000) {
+    await waitForResultsStable(Math.min(timeoutMs, 12000));
+
+    let candidates = await waitForImporterCandidates(5000);
+    if (candidates.length) {
+      return candidates;
+    }
+
+    await selectImportersTab();
+    await waitForResultsStable(12000);
+    candidates = await waitForImporterCandidates(8000);
+    return candidates;
   }
 
   async function waitForImporterCandidates(timeoutMs = 20000) {
-    const started = Date.now();
-
-    while (Date.now() - started < timeoutMs) {
+    const candidates = await waitUntil(() => {
       const candidates = getImporterCandidates();
       if (candidates.length) {
         return candidates;
       }
 
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      return null;
+    }, timeoutMs, 500, 500);
+
+    return candidates || [];
+  }
+
+  function companyKeyFromElement(element) {
+    return normalizeText(element?.getAttribute("title") || (element ? textOf(element) : ""));
+  }
+
+  function findNextUnvisitedImporter(candidates, visitedCompanyKeys) {
+    return candidates.find((candidate) => !visitedCompanyKeys.has(companyKeyFromElement(candidate))) || null;
+  }
+
+  function pageLooksBusy() {
+    const busyElements = Array.from(document.querySelectorAll("[aria-busy='true'], .spinner, .loader, .loading, .ant-spin, .ngx-spinner, .overlay"))
+      .filter((element) => visibleElement(element));
+
+    return busyElements.length > 0;
+  }
+
+  function importerListSignature() {
+    return getImporterCandidates()
+      .slice(0, 8)
+      .map((candidate) => companyKeyFromElement(candidate))
+      .join("|");
+  }
+
+  async function waitForResultsStable(timeoutMs = 12000) {
+    const started = Date.now();
+    let lastSignature = "";
+    let stableSince = 0;
+
+    while (Date.now() - started < timeoutMs) {
+      const candidates = getImporterCandidates();
+      const signature = importerListSignature();
+
+      if (!pageLooksBusy() && candidates.length && signature) {
+        if (signature === lastSignature) {
+          if (!stableSince) {
+            stableSince = Date.now();
+          }
+
+          if (Date.now() - stableSince >= 600) {
+            await sleep(250);
+            return {
+              ok: true,
+              candidates: candidates.length,
+              signature
+            };
+          }
+        } else {
+          lastSignature = signature;
+          stableSince = Date.now();
+        }
+      } else {
+        stableSince = 0;
+      }
+
+      await sleep(400);
     }
 
-    return [];
+    return {
+      ok: false,
+      reason: "Importer results did not become stable in time.",
+      candidates: getImporterCandidates().length,
+      busy: pageLooksBusy(),
+      signature: importerListSignature()
+    };
   }
 
   function parsePercentForHsCode(bodyText, hsCode) {
@@ -1410,12 +1597,12 @@
     }
 
     clickElement(commodities);
-    await new Promise((resolve) => setTimeout(resolve, 1200));
+    await waitUntil(() => findExactControl("Import Commodities", "button, a, [role='button']") || textOf(document.body).includes(code), 12000, 400, 700);
 
     const importCommodities = findExactControl("Import Commodities", "button, a, [role='button']");
     if (importCommodities) {
       clickElement(importCommodities);
-      await new Promise((resolve) => setTimeout(resolve, 800));
+      await waitUntil(() => textOf(document.body).includes(code), 12000, 400, 700);
     }
 
     const bodyText = textOf(document.body);
@@ -1794,11 +1981,68 @@
     link.click();
     link.remove();
     URL.revokeObjectURL(url);
+
+    return {
+      ok: true,
+      filename: fileName,
+      verification: "local-python"
+    };
+  }
+
+  async function confirmLocalJsonDownload(fileName, buyerName, hsCode) {
+    const params = new URLSearchParams({
+      filename: fileName,
+      buyer: buyerName || "",
+      hsCode: hsCode || "",
+      requireExcel: "1",
+      timeout: "20"
+    });
+
+    return fetchLocalGui(`/download-confirm?${params.toString()}`);
+  }
+
+  function dataCollectionFailureReason(data) {
+    if (data?.reason) {
+      return data.reason;
+    }
+
+    const missing = [];
+    const required = data?.diagnostics?.overviewRequired;
+    if (required) {
+      if (!required.companyName) missing.push("company name");
+      if (!required.annualImportTurnover) missing.push("annual import turnover");
+      if (!required.annualImportShipment) missing.push("annual import shipment");
+    }
+
+    if (missing.length) {
+      return `overview required fields missing: ${missing.join(", ")}`;
+    }
+
+    const countryCounts = data?.diagnostics?.countryCounts;
+    if (countryCounts && !countryCounts.importCountries) {
+      return "import country rows were not parsed";
+    }
+
+    const commodityCounts = data?.diagnostics?.commodityCounts;
+    if (commodityCounts && !commodityCounts.importCommodities) {
+      return "import commodity rows were not parsed";
+    }
+
+    return "data collection failed";
   }
 
   async function collectExcelData(hsCode) {
     const code = String(hsCode || "").trim();
+    const stoppedBeforeCommodity = await abortIfGuiStopRequested();
+    if (stoppedBeforeCommodity) {
+      return stoppedBeforeCommodity;
+    }
+
     const commodityValue = await assessCommodityValue(code);
+    const stoppedAfterCommodity = await abortIfGuiStopRequested();
+    if (stoppedAfterCommodity) {
+      return stoppedAfterCommodity;
+    }
 
     if (!commodityValue.ok || !commodityValue.qualified) {
       return {
@@ -1814,8 +2058,23 @@
     }
 
     const overview = await scrapeOverviewProfile();
+    const stoppedAfterOverview = await abortIfGuiStopRequested();
+    if (stoppedAfterOverview) {
+      return stoppedAfterOverview;
+    }
+
     const countries = await scrapeCountryBlocks();
+    const stoppedAfterCountries = await abortIfGuiStopRequested();
+    if (stoppedAfterCountries) {
+      return stoppedAfterCountries;
+    }
+
     const commodities = await scrapeCommodityBlocks();
+    const stoppedAfterCommodities = await abortIfGuiStopRequested();
+    if (stoppedAfterCommodities) {
+      return stoppedAfterCommodities;
+    }
+
     const companyName = overview.excelPinkBlock?.Company_Name || "company";
 
     const data = {
@@ -1844,136 +2103,410 @@
       downloaded: false
     };
 
+    if (!data.ok) {
+      data.reason = dataCollectionFailureReason(data);
+    }
+
     if (data.ok) {
-      downloadJson(data, `${safeFileName(companyName)}.json`);
-      data.downloaded = true;
+      const expectedFileName = `${safeFileName(companyName)}.json`;
+      const downloadResult = downloadJson(data, expectedFileName);
+      data.download = downloadResult;
+      data.downloadFileName = downloadResult.filename || expectedFileName;
+
+      if (!downloadResult.ok) {
+        return {
+          ...data,
+          ok: false,
+          fatal: true,
+          reason: `JSON download failed: ${downloadResult.reason || "unknown download error"}`
+        };
+      }
+
+      const confirmed = await confirmLocalJsonDownload(expectedFileName, companyName, code);
+      data.downloadConfirmation = confirmed;
+
+      if (!confirmed.ok) {
+        return {
+          ...data,
+          ok: false,
+          fatal: true,
+          reason: `JSON download confirmation failed: ${confirmed.data?.reason || confirmed.reason || "unknown confirmation error"}`
+        };
+      }
+
+      data.downloaded = Boolean(confirmed.data?.converted && confirmed.data?.outputFile);
+      data.outputFile = confirmed.data?.outputFile || "";
+
+      if (!data.downloaded) {
+        return {
+          ...data,
+          ok: false,
+          fatal: true,
+          reason: "Excel file was not created after JSON download confirmation"
+        };
+      }
     }
 
     return data;
   }
 
-  async function collectQualifiedCompanies(hsCode, targetCount = 60) {
-    const code = String(hsCode || "").trim();
-    const summary = {
-      ok: false,
-      mode: "list",
+  function readCollectionState() {
+    try {
+      const raw = sessionStorage.getItem(COLLECTION_STATE_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function writeCollectionState(state) {
+    sessionStorage.setItem(COLLECTION_STATE_KEY, JSON.stringify({
+      ...state,
+      updatedAt: new Date().toISOString()
+    }));
+  }
+
+  function clearCollectionState() {
+    sessionStorage.removeItem(COLLECTION_STATE_KEY);
+  }
+
+  function createCollectionState(hsCode, targetCount) {
+    const resultsUrl = location.href;
+
+    return {
+      active: true,
+      phase: "results",
+      hsCode: String(hsCode || "").trim(),
       targetCount,
-      qualifiedSaved: 0,
-      visited: 0,
-      skipped: 0,
-      failed: 0,
-      pages: 1,
-      companies: []
+      resultsUrl,
+      visitedCompanyKeys: [],
+      summary: {
+        ok: false,
+        mode: "list",
+        targetCount,
+        qualifiedSaved: 0,
+        visited: 0,
+        skipped: 0,
+        failed: 0,
+        pages: 1,
+        companies: [],
+        diagnostics: {
+          resultsUrl,
+          startedAt: new Date().toISOString(),
+          resumeMode: true
+        }
+      }
     };
+  }
+
+  function resultFromCollectionState(state, extra = {}) {
+    return {
+      ...(state?.summary || {}),
+      ...extra,
+      active: Boolean(state?.active),
+      phase: state?.phase || null
+    };
+  }
+
+  async function waitForCompanyProfileReady(timeoutMs = 45000) {
+    let lastLength = 0;
+    let stableCount = 0;
+    const started = Date.now();
+
+    while (Date.now() - started < timeoutMs) {
+      if (await getLocalGuiStopRequested()) {
+        return { ready: false, stopped: true };
+      }
+
+      if (!location.href.includes("/company-profile") || !findExactControl("Commodities", "a, button, [role='button']")) {
+        await sleep(700);
+        continue;
+      }
+
+      const bodyText = textOf(document.body);
+      const overview = extractOverviewProfile();
+      const lengthDelta = Math.abs(bodyText.length - lastLength);
+      stableCount = lengthDelta < 80 ? stableCount + 1 : 0;
+      lastLength = bodyText.length;
+
+      if (
+        bodyText.length > 800 &&
+        stableCount >= 2 &&
+        overview.required.companyName &&
+        overview.required.annualImportTurnover &&
+        overview.required.annualImportShipment
+      ) {
+        await sleep(1500);
+        return { ready: true, stopped: false };
+      }
+
+      await sleep(700);
+    }
+
+    return { ready: false, stopped: false };
+  }
+
+  async function continueQualifiedCollection(state) {
+    if (!state?.active) {
+      return {
+        ok: false,
+        reason: "No active qualified-company collection state."
+      };
+    }
+
+    if (await getLocalGuiStopRequested()) {
+      clearCollectionState();
+      state.active = false;
+      state.summary.ok = false;
+      state.summary.reason = "Stopped by GUI request.";
+      await postLocalGuiLog("사용자 요청으로 작업을 중단했습니다.", "중단");
+      return resultFromCollectionState(state, { stopped: true, reason: "Stopped by GUI request." });
+    }
+
+    if (state.summary.qualifiedSaved >= state.targetCount) {
+      state.active = false;
+      state.summary.ok = true;
+      state.summary.diagnostics.finishedAt = new Date().toISOString();
+      clearCollectionState();
+      return resultFromCollectionState(state, { reason: "Target count reached." });
+    }
+
+    if (location.href.includes("/company-profile")) {
+      const profileReady = await waitForCompanyProfileReady();
+      const profileUrl = location.href;
+      const listCompanyName = state.currentCompany?.companyName || "company";
+
+      if (profileReady.stopped) {
+        clearCollectionState();
+        state.active = false;
+        state.summary.ok = false;
+        state.summary.reason = "Stopped by GUI request.";
+        await postLocalGuiLog("사용자 요청으로 작업을 중단했습니다.", "중단");
+        return resultFromCollectionState(state, { stopped: true, reason: "Stopped by GUI request." });
+      }
+
+      if (!profileReady.ready) {
+        await postLocalGuiLog(`오류 발생: ${listCompanyName} - 회사 상세정보 로딩이 끝나지 않았습니다.`);
+        state.summary.failed += 1;
+        state.summary.companies.push({
+          companyName: listCompanyName,
+          status: "failed",
+          reason: "company profile did not finish rendering",
+          profileUrl
+        });
+      } else {
+        await postLocalGuiLog(`정보 확인 중: ${listCompanyName}`);
+        const result = await collectExcelData(state.hsCode);
+        if (result.stopped) {
+          state.active = false;
+          state.summary.ok = false;
+          state.summary.reason = result.reason;
+          writeCollectionState(state);
+          return resultFromCollectionState(state, { stopped: true, reason: result.reason });
+        }
+
+        state.summary.visited += 1;
+
+        if (result.downloaded) {
+          await postLocalGuiLog(`엑셀 저장 완료: ${result.excel?.pink?.Company_Name || listCompanyName}`);
+          state.summary.qualifiedSaved += 1;
+          state.summary.companies.push({
+            companyName: result.excel?.pink?.Company_Name || listCompanyName,
+            status: "saved",
+            percent: result.commodityValue?.importValuePercent,
+            downloadFileName: result.downloadFileName,
+            outputFile: result.outputFile,
+            profileUrl
+          });
+        } else if (result.skipped) {
+          await postLocalGuiLog(`조건 미달: ${listCompanyName}`);
+          state.summary.skipped += 1;
+          state.summary.companies.push({
+            companyName: listCompanyName,
+            status: "skipped",
+            percent: result.commodityValue?.importValuePercent ?? null,
+            reason: result.reason,
+            profileUrl
+          });
+        } else {
+          await postLocalGuiLog(`오류 발생: ${listCompanyName} - ${friendlyReason(result.reason)}`);
+          state.summary.failed += 1;
+          state.summary.companies.push({
+            companyName: listCompanyName,
+            status: "failed",
+            reason: result.reason || "data collection failed",
+            resultOk: result.ok,
+            fatal: Boolean(result.fatal),
+            profileUrl,
+            diagnostics: result.diagnostics || result.download || null
+          });
+
+          if (result.fatal) {
+            state.active = false;
+            state.summary.ok = false;
+            state.summary.reason = result.reason || "Fatal data collection error.";
+            state.summary.diagnostics.lastUrl = location.href;
+            state.summary.diagnostics.finishedAt = new Date().toISOString();
+            writeCollectionState(state);
+            return resultFromCollectionState(state);
+          }
+        }
+      }
+
+      state.currentCompany = null;
+      state.phase = "results";
+      writeCollectionState(state);
+
+      if (await getLocalGuiStopRequested()) {
+        clearCollectionState();
+        state.active = false;
+        state.summary.ok = false;
+        state.summary.reason = "Stopped by GUI request.";
+        await postLocalGuiLog("사용자 요청으로 작업을 중단했습니다.", "중단");
+        return resultFromCollectionState(state, { stopped: true, reason: "Stopped by GUI request." });
+      }
+
+      if (state.summary.qualifiedSaved >= state.targetCount) {
+        state.active = false;
+        state.summary.ok = true;
+        state.summary.diagnostics.finishedAt = new Date().toISOString();
+        clearCollectionState();
+        return resultFromCollectionState(state, { reason: "Target count reached." });
+      }
+
+      location.href = state.resultsUrl;
+      const returned = await waitForUrlPart("/search-results", 30000);
+      if (returned) {
+        await waitForImporterResultsReady(25000);
+        return continueQualifiedCollection(readCollectionState() || state);
+      }
+
+      return resultFromCollectionState(state, { resuming: true, reason: "Returning to search results." });
+    }
 
     if (!location.href.includes("/search-results")) {
-      return {
-        ...summary,
-        reason: "Run this from the search-results Importers list page."
-      };
+      location.href = state.resultsUrl;
+      const returned = await waitForUrlPart("/search-results", 30000);
+      if (returned) {
+        await waitForImporterResultsReady(25000);
+        return continueQualifiedCollection(readCollectionState() || state);
+      }
+
+      return resultFromCollectionState(state, { resuming: true, reason: "Navigating back to search results." });
     }
 
     closeOpenMenus();
     document.body.click();
-    await new Promise((resolve) => setTimeout(resolve, 800));
+    await sleep(500);
 
-    let initialCandidates = await waitForImporterCandidates(4000);
-    if (!initialCandidates.length) {
+    let candidates = await waitForImporterResultsReady(25000);
+    if (!candidates.length) {
       const tabResult = await selectImportersTab();
       closeOpenMenus();
-      await new Promise((resolve) => setTimeout(resolve, 2000));
-      initialCandidates = await waitForImporterCandidates(4000);
-
-      if (!initialCandidates.length) {
-        summary.reason = tabResult.ok
-          ? "No importer candidates found after opening Importers tab."
-          : "No importer candidates found and Importers tab could not be opened.";
-        return summary;
-      }
-    }
-
-    while (summary.qualifiedSaved < targetCount) {
-      const candidates = initialCandidates.length ? initialCandidates : await waitForImporterCandidates();
-      initialCandidates = [];
+      await sleep(800);
+      candidates = await waitForImporterResultsReady(25000);
 
       if (!candidates.length) {
-        summary.reason = "No importer candidates found.";
-        break;
+        state.summary.reason = tabResult.ok
+          ? "No importer candidates found after opening Importers tab."
+          : "No importer candidates found and Importers tab could not be opened.";
+        state.active = false;
+        writeCollectionState(state);
+        return resultFromCollectionState(state);
       }
-
-      for (let index = 0; index < candidates.length && summary.qualifiedSaved < targetCount; index += 1) {
-        const freshCandidates = await waitForImporterCandidates();
-        const target = freshCandidates[index];
-
-        if (!target) {
-          continue;
-        }
-
-        const listCompanyName = textOf(target);
-        openElementInSameTab(target);
-        const opened = await waitForUrlPart("/company-profile", 30000);
-
-        if (!opened) {
-          summary.failed += 1;
-          summary.companies.push({
-            companyName: listCompanyName,
-            status: "failed",
-            reason: "company profile did not open"
-          });
-          continue;
-        }
-
-        const result = await collectExcelData(code);
-        summary.visited += 1;
-
-        if (result.downloaded) {
-          summary.qualifiedSaved += 1;
-          summary.companies.push({
-            companyName: result.excel?.pink?.Company_Name || listCompanyName,
-            status: "saved",
-            percent: result.commodityValue?.importValuePercent
-          });
-        } else if (result.skipped) {
-          summary.skipped += 1;
-          summary.companies.push({
-            companyName: listCompanyName,
-            status: "skipped",
-            percent: result.commodityValue?.importValuePercent ?? null,
-            reason: result.reason
-          });
-        } else {
-          summary.failed += 1;
-          summary.companies.push({
-            companyName: listCompanyName,
-            status: "failed",
-            reason: "data collection failed"
-          });
-        }
-
-        const returned = await goBackToResults();
-        if (!returned) {
-          summary.reason = "Could not return to search results.";
-          return summary;
-        }
-      }
-
-      if (summary.qualifiedSaved >= targetCount) {
-        break;
-      }
-
-      const moved = await goNextImporterPage();
-      if (!moved) {
-        summary.reason = "Next page not found.";
-        break;
-      }
-      summary.pages += 1;
     }
 
-    summary.ok = summary.qualifiedSaved >= targetCount;
-    return summary;
+    const visitedCompanyKeys = new Set(state.visitedCompanyKeys || []);
+    let target = findNextUnvisitedImporter(candidates, visitedCompanyKeys);
+
+    if (!target) {
+      const moved = await goNextImporterPage();
+      if (!moved) {
+        state.summary.reason = "Next page not found.";
+        state.active = false;
+        writeCollectionState(state);
+        return resultFromCollectionState(state);
+      }
+
+      state.summary.pages += 1;
+      candidates = await waitForImporterResultsReady(25000);
+      target = findNextUnvisitedImporter(candidates, visitedCompanyKeys);
+
+      if (!target) {
+        await selectImportersTab();
+        await waitForImporterResultsReady(25000);
+        candidates = getImporterCandidates();
+        target = findNextUnvisitedImporter(candidates, visitedCompanyKeys);
+      }
+
+      if (!target) {
+        state.summary.reason = "No unvisited importer candidates found after moving to next page.";
+        state.active = false;
+        await postLocalGuiLog(
+          `다음 페이지에서 새 바이어를 찾지 못해 중단했습니다. 현재 엑셀 ${state.summary.qualifiedSaved}/${state.targetCount}개 저장`,
+          "중단"
+        );
+        writeCollectionState(state);
+        return resultFromCollectionState(state);
+      }
+    }
+
+    const companyName = target.getAttribute("title") || textOf(target);
+    const companyKey = companyKeyFromElement(target);
+    visitedCompanyKeys.add(companyKey);
+    await postLocalGuiLog(`바이어 확인 중: ${companyName}`);
+
+    state.visitedCompanyKeys = Array.from(visitedCompanyKeys);
+    state.currentCompany = {
+      companyName,
+      companyKey
+    };
+    state.phase = "profile";
+    writeCollectionState(state);
+
+    const openedBy = openElementInSameTab(target);
+    const opened = await waitForUrlPart("/company-profile", 30000);
+    if (opened) {
+      return continueQualifiedCollection(readCollectionState() || state);
+    }
+
+    return resultFromCollectionState(state, {
+      resuming: true,
+      reason: "Opening company profile.",
+      opening: {
+        companyName,
+        openedBy
+      }
+    });
+  }
+
+  async function collectQualifiedCompanies(hsCode, targetCount = 60) {
+    if (!location.href.includes("/search-results")) {
+      return {
+        ok: false,
+        mode: "list",
+        targetCount,
+        qualifiedSaved: 0,
+        visited: 0,
+        skipped: 0,
+        failed: 0,
+        pages: 1,
+        companies: [],
+        reason: "Run this from the search-results Importers list page."
+      };
+    }
+
+    const state = createCollectionState(hsCode, targetCount);
+    writeCollectionState(state);
+    return continueQualifiedCollection(state);
   }
 
   async function runTotalAutomation(hsCode) {
+    const state = readCollectionState();
+    if (state?.active) {
+      return continueQualifiedCollection(state);
+    }
+
     if (location.href.includes("/search-results")) {
       return collectQualifiedCompanies(hsCode, 5);
     }
@@ -1987,6 +2520,33 @@
       reason: "Run Total on either the search-results list page or a company-profile page.",
       url: location.href
     };
+  }
+
+  async function autoResumeQualifiedCollection() {
+    const state = readCollectionState();
+    if (!state?.active) {
+      return;
+    }
+
+    showResult(resultFromCollectionState(state, { resuming: true, reason: "Auto-resume waiting for page." }));
+
+    try {
+      const result = await continueQualifiedCollection(state);
+      showResult(result);
+    } catch (error) {
+      const failedState = readCollectionState() || state;
+      failedState.active = false;
+      failedState.summary = failedState.summary || {};
+      failedState.summary.ok = false;
+      failedState.summary.reason = error?.message || String(error);
+      failedState.summary.diagnostics = {
+        ...(failedState.summary.diagnostics || {}),
+        lastUrl: location.href,
+        failedAt: new Date().toISOString()
+      };
+      writeCollectionState(failedState);
+      showResult(resultFromCollectionState(failedState));
+    }
   }
 
   async function chooseFromDropdown(triggerText, optionTexts, searchText) {
@@ -2121,6 +2681,401 @@
     output.textContent = JSON.stringify(data, null, 2);
   }
 
+  async function fetchLocalGui(path) {
+    try {
+      const response = await fetch(`${LOCAL_GUI_URL}${path}`, {
+        method: "GET",
+        cache: "no-store"
+      });
+      const data = await response.json();
+
+      return {
+        ok: response.ok && Boolean(data.ok),
+        status: response.status,
+        data
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        reason: error?.message || String(error),
+        url: `${LOCAL_GUI_URL}${path}`
+      };
+    }
+  }
+
+  async function checkLocalGui() {
+    return fetchLocalGui("/health");
+  }
+
+  async function getLocalGuiTask() {
+    return fetchLocalGui("/task");
+  }
+
+  async function getLocalGuiQueueCurrent() {
+    return fetchLocalGui("/queue/current");
+  }
+
+  async function completeLocalGuiQueueTask(collection) {
+    const params = new URLSearchParams({
+      saved: String(collection?.qualifiedSaved ?? ""),
+      visited: String(collection?.visited ?? ""),
+      reason: collection?.reason || ""
+    });
+    return fetchLocalGui(`/queue/complete?${params.toString()}`);
+  }
+
+  async function failLocalGuiQueueTask(reason) {
+    const params = new URLSearchParams({
+      reason: reason || "Queue automation failed."
+    });
+    return fetchLocalGui(`/queue/fail?${params.toString()}`);
+  }
+
+  async function postLocalGuiLog(message, status = "") {
+    const params = new URLSearchParams({
+      message: message || "",
+      status: status || ""
+    });
+    return fetchLocalGui(`/log?${params.toString()}`);
+  }
+
+  async function getLocalGuiCommand() {
+    return fetchLocalGui("/command");
+  }
+
+  async function postLocalGuiCommandResult(command, ok, message) {
+    const params = new URLSearchParams({
+      id: String(command?.id || ""),
+      ok: ok ? "true" : "false",
+      message: message || ""
+    });
+    return fetchLocalGui(`/command-result?${params.toString()}`);
+  }
+
+  async function getLocalGuiStopRequested() {
+    const result = await fetchLocalGui("/stop-request");
+    return Boolean(result.ok && result.data?.stopRequested);
+  }
+
+  async function abortIfGuiStopRequested() {
+    if (await getLocalGuiStopRequested()) {
+      clearCollectionState();
+      await postLocalGuiLog("사용자 요청으로 작업을 중단했습니다.", "중단");
+      return {
+        ok: false,
+        fatal: true,
+        stopped: true,
+        reason: "Stopped by GUI request."
+      };
+    }
+
+    return null;
+  }
+
+  async function loadLocalGuiTaskIntoPanel() {
+    const result = await getLocalGuiTask();
+    const task = result.data?.task;
+
+    if (!result.ok || !task) {
+      return result;
+    }
+
+    const hsInput = document.getElementById("export-genius-helper-hs");
+    const minInput = document.getElementById("export-genius-helper-min");
+    const maxInput = document.getElementById("export-genius-helper-max");
+
+    if (hsInput) {
+      hsInput.value = task.hsCode || "";
+    }
+    if (minInput) {
+      minInput.value = task.minValue || "";
+    }
+    if (maxInput) {
+      maxInput.value = task.maxValue || "";
+    }
+
+    return {
+      ok: true,
+      loaded: true,
+      task
+    };
+  }
+
+  async function applyLocalGuiTaskCriteria() {
+    const loaded = await loadLocalGuiTaskIntoPanel();
+    const task = loaded.task;
+
+    if (!loaded.ok || !task) {
+      return loaded;
+    }
+
+    const criteria = await applyUserCriteria({
+      hsCode: task.hsCode,
+      minValue: task.minValue,
+      maxValue: task.maxValue
+    });
+
+    return {
+      ok: Boolean(criteria.ok),
+      loaded,
+      criteria
+    };
+  }
+
+  async function startLocalGuiTaskAutomation() {
+    const applied = await applyLocalGuiTaskCriteria();
+    const task = applied.loaded?.task;
+
+    if (!applied.ok || !task) {
+      return applied;
+    }
+
+    const targetCount = Math.max(1, Number.parseInt(task.targetCount, 10) || 5);
+    const alreadySaved = Math.max(0, Number.parseInt(task.alreadySaved, 10) || 0);
+    const remainingCount = Math.max(0, Number.parseInt(task.remainingCount, 10) || (targetCount - alreadySaved));
+
+    if (remainingCount <= 0) {
+      return {
+        ok: true,
+        skipped: true,
+        reason: "Target already reached.",
+        targetCount,
+        alreadySaved,
+        remainingCount,
+        collection: {
+          ok: true,
+          qualifiedSaved: 0,
+          targetCount: 0,
+          companies: [],
+          reason: "Target already reached."
+        }
+      };
+    }
+
+    if (!location.href.includes("/search-results")) {
+      const openedResults = await waitForUrlPart("/search-results", 30000);
+      if (!openedResults) {
+        return {
+          ok: false,
+          reason: "Search results page did not open after applying criteria.",
+          applied,
+          url: location.href
+        };
+      }
+    }
+
+    const collection = await collectQualifiedCompanies(task.hsCode, remainingCount);
+
+    return {
+      ok: Boolean(collection.ok),
+      applied,
+      targetCount,
+      alreadySaved,
+      remainingCount,
+      collection
+    };
+  }
+
+  function friendlyReason(reason = "") {
+    const text = String(reason || "");
+    if (text.includes("overview required fields missing")) {
+      return "회사 기본 정보를 읽지 못했습니다.";
+    }
+    if (text.includes("download confirmation failed")) {
+      return "파일 다운로드 확인에 실패했습니다.";
+    }
+    if (text.includes("download failed")) {
+      return "파일 다운로드에 실패했습니다.";
+    }
+    if (text.includes("HS code import value percent")) {
+      return "HS코드 비중 조건에 맞지 않습니다.";
+    }
+    if (text.includes("company profile did not finish rendering")) {
+      return "회사 상세페이지 로딩이 끝나지 않았습니다.";
+    }
+    return text || "알 수 없는 오류가 발생했습니다.";
+  }
+
+  async function logCollectionForGui(task, collection, run = null) {
+    if (!collection) {
+      const reason = run?.criteria?.totalValue?.reason || run?.criteria?.reason || run?.reason || "작업을 시작하지 못했습니다.";
+      await postLocalGuiLog(`${task.company} / HS ${task.hsCode}: ${friendlyReason(reason)}`, "오류 발생");
+      return;
+    }
+
+    await postLocalGuiLog(
+      `${task.company} / HS ${task.hsCode} 작업 결과: 엑셀 ${collection.qualifiedSaved || 0}개 저장`,
+      "작업 확인 중"
+    );
+  }
+
+  async function startLocalGuiQueueAutomation() {
+    const results = [];
+    let guard = 0;
+
+    await postLocalGuiLog("자동 작업을 시작합니다.", "모니터링 중");
+
+    while (guard < 200) {
+      guard += 1;
+
+      if (await getLocalGuiStopRequested()) {
+        clearCollectionState();
+        await postLocalGuiLog("사용자 요청으로 작업을 중단했습니다.", "중단");
+        return {
+          ok: false,
+          stopped: true,
+          reason: "Stopped by GUI request.",
+          results
+        };
+      }
+
+      const current = await getLocalGuiQueueCurrent();
+      if (!current.ok) {
+        return {
+          ok: false,
+          reason: current.data?.reason || current.reason || "Could not read current queue task.",
+          current,
+          results
+        };
+      }
+
+      if (current.data?.done) {
+        return {
+          ok: true,
+          done: true,
+          results,
+          reason: "Queue completed."
+        };
+      }
+
+      const task = current.data?.task;
+      await postLocalGuiLog(
+        `${current.data?.queuePosition}/${current.data?.queueTotal} 작업 진행 중: ${task.company} / HS ${task.hsCode} - 현재 ${task.alreadySaved || 0}/${task.targetCount}, 추가 ${task.remainingCount || task.targetCount}개`,
+        "작업 진행 중"
+      );
+      const run = await startLocalGuiTaskAutomation();
+      results.push({
+        queuePosition: current.data?.queuePosition,
+        queueTotal: current.data?.queueTotal,
+        task,
+        run
+      });
+
+      await logCollectionForGui(task, run.collection, run);
+
+      if (await getLocalGuiStopRequested()) {
+        clearCollectionState();
+        await postLocalGuiLog("사용자 요청으로 작업을 중단했습니다.", "중단");
+        return {
+          ok: false,
+          stopped: true,
+          reason: "Stopped by GUI request.",
+          results
+        };
+      }
+
+      if (!run.ok) {
+        await failLocalGuiQueueTask(run.collection?.reason || run.reason || "Current queue task failed.");
+        await postLocalGuiLog(`오류 발생: ${task.company} 작업이 중단되었습니다.`, "오류 발생");
+        return {
+          ok: false,
+          reason: run.collection?.reason || run.reason || "Current queue task failed.",
+          failedTask: task,
+          run,
+          results
+        };
+      }
+
+      const completed = await completeLocalGuiQueueTask(run.collection);
+      results[results.length - 1].completed = completed;
+
+      if (!completed.ok) {
+        await failLocalGuiQueueTask(completed.data?.reason || completed.reason || "Could not complete queue task.");
+        await postLocalGuiLog(`오류 발생: ${task.company} 저장 파일 수를 확인하지 못했습니다.`, "오류 발생");
+        return {
+          ok: false,
+          reason: completed.data?.reason || completed.reason || "Could not complete queue task.",
+          failedTask: task,
+          completed,
+          results
+        };
+      }
+
+      if (completed.data?.done) {
+        await postLocalGuiLog("모든 선택 작업이 완료되었습니다.", "완료");
+        return {
+          ok: true,
+          done: true,
+          results,
+          reason: "Queue completed."
+        };
+      }
+    }
+
+    await failLocalGuiQueueTask("Queue guard limit reached.");
+    await postLocalGuiLog("오류 발생: 작업 반복 횟수가 너무 많아 중단했습니다.", "오류 발생");
+    return {
+      ok: false,
+      reason: "Queue guard limit reached.",
+      results
+    };
+  }
+
+  let localGuiCommandRunning = false;
+
+  async function handleLocalGuiCommand(command) {
+    if (!command?.action) {
+      return;
+    }
+
+    if (command.action === "stop") {
+      clearCollectionState();
+      await postLocalGuiLog("작업을 중단했습니다.", "중단");
+      await postLocalGuiCommandResult(command, true, "작업 중단 요청을 처리했습니다.");
+      return;
+    }
+
+    if (command.action !== "startQueue") {
+      await postLocalGuiCommandResult(command, false, `알 수 없는 명령입니다: ${command.action}`);
+      return;
+    }
+
+    if (localGuiCommandRunning) {
+      await postLocalGuiCommandResult(command, false, "이미 자동 작업이 실행 중입니다.");
+      return;
+    }
+
+    localGuiCommandRunning = true;
+    try {
+      const result = await startLocalGuiQueueAutomation();
+      showResult(result);
+      await postLocalGuiCommandResult(
+        command,
+        Boolean(result.ok),
+        result.ok ? "자동 작업이 완료되었습니다." : `자동 작업이 중단되었습니다: ${result.reason || "오류"}`
+      );
+    } catch (error) {
+      const message = error?.message || String(error);
+      await postLocalGuiLog(`오류 발생: ${message}`, "오류 발생");
+      await postLocalGuiCommandResult(command, false, message);
+      showResult({ ok: false, reason: message });
+    } finally {
+      localGuiCommandRunning = false;
+    }
+  }
+
+  async function pollLocalGuiCommands() {
+    if (localGuiCommandRunning) {
+      return;
+    }
+
+    const result = await getLocalGuiCommand();
+    const command = result.data?.command;
+    if (result.ok && command) {
+      await handleLocalGuiCommand(command);
+    }
+  }
+
   function createPanel() {
     document.getElementById("export-genius-helper-panel")?.remove();
 
@@ -2196,6 +3151,16 @@
       ["표시", () => showResult(highlightControls())],
       ["입력", () => showResult(testFillFirstInput())],
       ["Global", async () => showResult(await selectGlobalImport())],
+      ["GUI", async () => showResult(await checkLocalGui())],
+      ["작업", async () => showResult(await getLocalGuiTask())],
+      ["가져오기", async () => showResult(await loadLocalGuiTaskIntoPanel())],
+      ["작업적용", async () => showResult(await applyLocalGuiTaskCriteria())],
+      ["작업시작", async () => showResult(await startLocalGuiTaskAutomation())],
+      ["전체작업", async () => showResult(await startLocalGuiQueueAutomation())],
+      ["Stop", () => {
+        clearCollectionState();
+        showResult({ ok: true, stopped: true, reason: "Qualified-company collection state cleared." });
+      }],
       ["조건", async () => showResult(await applyUserCriteria({
         hsCode: hsInput.value,
         minValue: minInput.value,
@@ -2237,10 +3202,22 @@
     scrapeCommodityBlocks,
     collectExcelData,
     collectQualifiedCompanies,
-    runTotalAutomation
+    runTotalAutomation,
+    autoResumeQualifiedCollection,
+    checkLocalGui,
+    getLocalGuiTask,
+    getLocalGuiQueueCurrent,
+    loadLocalGuiTaskIntoPanel,
+    applyLocalGuiTaskCriteria,
+    startLocalGuiTaskAutomation,
+    startLocalGuiQueueAutomation,
+    readCollectionState,
+    clearCollectionState
   };
 
   createPanel();
+  setTimeout(autoResumeQualifiedCollection, 1200);
+  setInterval(pollLocalGuiCommands, 1500);
 
   return inspectPage();
 })();

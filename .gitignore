@@ -2,5 +2,6 @@ auth/
 downloads/
 debug/
 edge-profile/
+output/
 __pycache__/
 *.pyc

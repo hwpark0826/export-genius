@@ -1,12 +1,12 @@
 {
   "manifest_version": 3,
-  "name": "Export Genius Helper",
-  "version": "0.1.15",
+  "name": "Export Genius Helper 0.3.10",
+  "version": "0.3.10",
   "description": "Small helper to inspect and automate the current Export Genius page.",
   "permissions": ["activeTab", "scripting"],
-  "host_permissions": ["https://dashboard.exportgenius.in/*"],
+  "host_permissions": ["https://dashboard.exportgenius.in/*", "http://127.0.0.1:8765/*"],
   "action": {
-    "default_title": "Export Genius Helper",
+    "default_title": "Export Genius Helper 0.3.10",
     "default_popup": "popup.html"
   },
   "content_scripts": [
