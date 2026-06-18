@@ -1,10 +1,15 @@
 (() => {
-  const HELPER_VERSION = "v2026-06-17-pagination-resume-paths";
+  const HELPER_VERSION = "v2026-06-18-logo-name-hyphen-rawlog";
+  const USE_SAVED_BUYER_SKIP_RESUME = false;
   const COLLECTION_STATE_KEY = "exportGeniusQualifiedCollectionState";
   const LOCAL_GUI_URL = "http://127.0.0.1:8765";
 
   function textOf(element) {
-    return (element.innerText || element.textContent || "").replace(/\s+/g, " ").trim();
+    if (!element) {
+      return "";
+    }
+
+    return (element?.innerText || element?.textContent || "").replace(/\s+/g, " ").trim();
   }
 
   function sleep(ms) {
@@ -59,10 +64,7 @@
   }
 
   function isHelperElement(element) {
-    return Boolean(
-      element.closest("#export-genius-helper-panel") ||
-      element.closest("#export-genius-helper-output")
-    );
+    return false;
   }
 
   function inspectPage() {
@@ -109,7 +111,7 @@
 
     return {
       highlighted: elements.length,
-      message: "보이는 입력창/버튼에 빨간 표시를 했습니다."
+      message: "蹂댁씠???낅젰李?踰꾪듉??鍮④컙 ?쒖떆瑜??덉뒿?덈떎."
     };
   }
 
@@ -131,7 +133,7 @@
 
     return {
       ok: true,
-      message: "첫 번째 입력 가능한 필드에 test를 입력했습니다.",
+      message: "泥?踰덉㎏ ?낅젰 媛?ν븳 ?꾨뱶??test瑜??낅젰?덉뒿?덈떎.",
       element: describeElement(input)
     };
   }
@@ -149,7 +151,9 @@
   }
 
   function normalizeText(value) {
-    return String(value || "").toLowerCase().replace(/[\s\-_/+.,:()[\]{}–—]+/g, "");
+    return Array.from(String(value || "").toLowerCase())
+      .filter((character) => /[a-z0-9]/.test(character))
+      .join("");
   }
 
   function matchesExactText(element, expectedTexts) {
@@ -210,6 +214,14 @@
       })
       .slice(0, 12)
       .map(describeElement);
+  }
+
+  function compareDocumentOrder(a, b) {
+    if (a === b) {
+      return 0;
+    }
+
+    return a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1;
   }
 
   function findDropdownInputNear(trigger) {
@@ -290,70 +302,45 @@
   }
 
   function getTopFilterCombobox(kind) {
-    const inputs = Array.from(document.querySelectorAll("input[role='combobox'], input[type='search']"))
+    const expected = kind === "condition" ? "selectcondition" : "selectfilter";
+    const containers = Array.from(document.querySelectorAll(".filter-select, .select-filter-condition, .ant-select"))
       .filter((element) => {
         if (isHelperElement(element)) {
           return false;
         }
 
-        const rect = element.getBoundingClientRect();
-        return rect.width > 0 && rect.height > 0 &&
-          rect.top >= 100 &&
-          rect.top <= 190 &&
-          rect.left > 420 &&
-          rect.left < 850;
-      })
-      .sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left);
+        const text = normalizeText(textOf(element) || element.getAttribute("aria-label") || "");
+        const inputText = normalizeText(Array.from(element.querySelectorAll("input"))
+          .map((input) => input.getAttribute("placeholder") || input.value || "")
+          .join(" "));
 
-    return kind === "condition" ? inputs[1] : inputs[0];
+        return visibleElement(element) && (text.includes(expected) || inputText.includes(expected));
+      })
+      .sort(compareDocumentOrder);
+
+    const container = containers[0];
+    return container?.querySelector("input[role='combobox'], input[type='search']") || null;
   }
 
   function getTopFilterTrigger(kind) {
     const labelText = kind === "condition" ? "select condition" : "select filter";
-    const label = Array.from(document.querySelectorAll("div, span, button, input, [role='button']"))
+    const expected = normalizeText(labelText);
+    const container = Array.from(document.querySelectorAll(".filter-select, .select-filter-condition, .ant-select"))
       .filter((element) => {
         if (isHelperElement(element)) {
           return false;
         }
 
-        const rect = element.getBoundingClientRect();
         const text = normalizeText(textOf(element) || element.getAttribute("placeholder") || "");
-        return rect.width > 0 && rect.height > 0 &&
-          rect.top >= 100 &&
-          rect.top <= 190 &&
-          rect.left > 380 &&
-          rect.left < 850 &&
-          text.includes(normalizeText(labelText));
+        const inputText = normalizeText(Array.from(element.querySelectorAll("input"))
+          .map((input) => input.getAttribute("placeholder") || input.value || "")
+          .join(" "));
+        return visibleElement(element) && (text.includes(expected) || inputText.includes(expected));
       })
-      .sort((a, b) => {
-        const aRect = a.getBoundingClientRect();
-        const bRect = b.getBoundingClientRect();
-        return aRect.width * aRect.height - bRect.width * bRect.height;
-      })[0];
+      .sort(compareDocumentOrder)[0];
 
-    if (label) {
-      let best = label;
-      let current = label;
-
-      for (let index = 0; index < 5 && current.parentElement; index += 1) {
-        current = current.parentElement;
-        const rect = current.getBoundingClientRect();
-        const text = normalizeText(textOf(current));
-
-        if (
-          rect.width >= 120 &&
-          rect.width <= 260 &&
-          rect.height >= 32 &&
-          rect.height <= 70 &&
-          rect.top >= 100 &&
-          rect.top <= 190 &&
-          text.includes(normalizeText(labelText))
-        ) {
-          best = current;
-        }
-      }
-
-      return best;
+    if (container) {
+      return container.querySelector(".ant-select-selector, [role='combobox']") || container;
     }
 
     const input = getTopFilterCombobox(kind);
@@ -370,64 +357,13 @@
         rect.width >= 120 &&
         rect.width <= 260 &&
         rect.height >= 32 &&
-        rect.height <= 70 &&
-        rect.top >= 100 &&
-        rect.top <= 190
+        rect.height <= 90
       ) {
         best = current;
       }
     }
 
     return best;
-  }
-
-  function getTopFilterClickTarget(kind) {
-    const labelText = kind === "condition" ? "select condition" : "select filter";
-    const label = Array.from(document.querySelectorAll("div, span, label"))
-      .filter((element) => {
-        if (isHelperElement(element)) {
-          return false;
-        }
-
-        const rect = element.getBoundingClientRect();
-        return rect.width > 0 && rect.height > 0 &&
-          rect.top >= 80 &&
-          rect.top <= 130 &&
-          rect.left > 380 &&
-          rect.left < 850 &&
-          normalizeText(textOf(element)) === normalizeText(labelText);
-      })
-      .sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left)[0];
-
-    if (!label) {
-      return null;
-    }
-
-    const rect = label.getBoundingClientRect();
-    const x = rect.left + 125;
-    const y = rect.top - 12;
-    const target = document.elementFromPoint(x, y);
-
-    return {
-      element: target || label,
-      rect,
-      x,
-      y
-    };
-  }
-
-  function clickPoint(target) {
-    const element = target.element;
-    const x = target.x;
-    const y = target.y;
-
-    element.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, clientX: x, clientY: y }));
-    element.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, clientX: x, clientY: y }));
-    element.dispatchEvent(new MouseEvent("mouseover", { bubbles: true, clientX: x, clientY: y }));
-    element.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, clientX: x, clientY: y }));
-    element.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, clientX: x, clientY: y }));
-    element.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, clientX: x, clientY: y }));
-    element.dispatchEvent(new MouseEvent("click", { bubbles: true, clientX: x, clientY: y }));
   }
 
   function findOptionNearTrigger(trigger, optionTexts, anchorRect = null) {
@@ -459,8 +395,7 @@
       return antResult;
     }
 
-    const pointTarget = getTopFilterClickTarget(kind);
-    const trigger = pointTarget?.element || getTopFilterTrigger(kind);
+    const trigger = getTopFilterTrigger(kind);
 
     if (!trigger) {
       return {
@@ -473,28 +408,16 @@
     closeOpenMenus();
     await new Promise((resolve) => setTimeout(resolve, 200));
 
-    if (pointTarget) {
-      clickPoint(pointTarget);
-    } else {
-      clickAt(trigger, 0.9);
-    }
+    clickElement(trigger);
     await new Promise((resolve) => setTimeout(resolve, 700));
 
-    const anchorRect = pointTarget
-      ? {
-        left: pointTarget.rect.left,
-        right: pointTarget.rect.left + 280,
-        bottom: pointTarget.rect.top + 24
-      }
-      : null;
-    const option = findOptionNearTrigger(trigger, optionTexts, anchorRect);
+    const option = findOptionNearTrigger(trigger, optionTexts);
 
     if (!option) {
       return {
         ok: false,
         reason: `option not found near ${kind}: ${optionTexts.join(", ")}`,
         trigger: describeElement(trigger),
-        clickPoint: pointTarget ? { x: Math.round(pointTarget.x), y: Math.round(pointTarget.y) } : null,
         candidates: Array.from(document.querySelectorAll("button, div, span, li, a, [role='option'], [role='button']"))
           .filter((element) => {
             if (isHelperElement(element)) {
@@ -522,7 +445,6 @@
     return {
       ok: true,
       trigger: describeElement(trigger),
-      clickPoint: pointTarget ? { x: Math.round(pointTarget.x), y: Math.round(pointTarget.y) } : null,
       option: describeElement(option)
     };
   }
@@ -531,6 +453,7 @@
     const selector = kind === "condition"
       ? ".select-filter-condition"
       : ".filter-select";
+    const expected = kind === "condition" ? "selectcondition" : "selectfilter";
 
     return Array.from(document.querySelectorAll(selector))
       .filter((element) => {
@@ -538,10 +461,14 @@
           return false;
         }
 
-        const rect = element.getBoundingClientRect();
-        return rect.width > 0 && rect.height > 0 && rect.top >= 90 && rect.top <= 200;
+        const text = normalizeText(textOf(element) || "");
+        const inputText = normalizeText(Array.from(element.querySelectorAll("input"))
+          .map((input) => input.getAttribute("placeholder") || input.value || "")
+          .join(" "));
+
+        return visibleElement(element) && (text.includes(expected) || inputText.includes(expected) || element.matches(selector));
       })
-      .sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left)[0] || null;
+      .sort(compareDocumentOrder)[0] || null;
   }
 
   function findAntdOption(optionTexts) {
@@ -563,6 +490,24 @@
       })[0] || null;
   }
 
+  async function openAntdSelect(selector, searchInput = null) {
+    selector.scrollIntoView({ block: "center", inline: "nearest" });
+    selector.dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
+    selector.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+    selector.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    selector.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    selector.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+    selector.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+    selector.click();
+
+    if (searchInput) {
+      searchInput.focus();
+      searchInput.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", code: "ArrowDown", bubbles: true }));
+    }
+
+    await sleep(500);
+  }
+
   async function chooseAntdTopFilterSelect(kind, optionTexts) {
     const container = getAntdTopFilterContainer(kind);
 
@@ -578,17 +523,25 @@
 
     closeOpenMenus();
     await new Promise((resolve) => setTimeout(resolve, 150));
-    clickAt(selector, 0.9);
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    await openAntdSelect(selector, searchInput);
 
     let option = findAntdOption(optionTexts);
     let usedSearch = false;
 
     if (!option && searchInput) {
+      dispatchValue(searchInput, "");
+      await sleep(200);
       dispatchValue(searchInput, optionTexts[0]);
       searchInput.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", code: "ArrowDown", bubbles: true }));
       usedSearch = true;
       await new Promise((resolve) => setTimeout(resolve, 700));
+      option = findAntdOption(optionTexts);
+    }
+
+    if (!option) {
+      closeOpenMenus();
+      await sleep(250);
+      await openAntdSelect(selector, searchInput);
       option = findAntdOption(optionTexts);
     }
 
@@ -704,23 +657,29 @@
   }
 
   function openElementInSameTab(element) {
-    installSameTabWindowOpenOverride();
-
-    const anchor = element.closest("a[href]") || element.querySelector?.("a[href]");
+    const row = element.closest(".G-table-row, [role='row'], tr");
+    const anchor = element.closest("a[href]") ||
+      element.querySelector?.("a[href]") ||
+      row?.querySelector("a[href*='company-profile'], a[href]");
 
     if (anchor?.href) {
-      location.href = anchor.href;
+      anchor.removeAttribute("target");
+      anchor.setAttribute("target", "_self");
+      clickElement(anchor);
       return {
         usedHref: true,
-        href: anchor.href
+        href: anchor.href,
+        mode: "native-anchor-click"
       };
     }
 
+    installSameTabWindowOpenOverride();
     element.removeAttribute?.("target");
     clickElement(element);
 
     return {
-      usedHref: false
+      usedHref: false,
+      mode: "element-click"
     };
   }
 
@@ -919,16 +878,162 @@
     };
   }
 
-  async function applyTotalValueRange(minValue, maxValue) {
-    const existingApplied = Array.from(document.querySelectorAll("div, span, p"))
-      .find((element) => {
-        if (isHelperElement(element)) {
+  function isResultsTableElement(element) {
+    return Boolean(element?.closest(
+      "table, thead, tbody, tr, th, td, .ant-table, .ant-table-wrapper, [role='table'], [role='row'], [role='columnheader'], [role='cell']"
+    ));
+  }
+
+  function compactTextElement(element, maxHeight = 180, maxTextLength = 500) {
+    if (!element || isHelperElement(element) || isResultsTableElement(element)) {
+      return false;
+    }
+
+    const rect = element.getBoundingClientRect();
+    const text = normalizeText(textOf(element));
+    return rect.width > 0 && rect.height > 0 && rect.height <= maxHeight && text.length <= maxTextLength;
+  }
+
+  function findTotalValueFilterPanel() {
+    return Array.from(document.querySelectorAll("aside, section, form, div"))
+      .filter((element) => {
+        if (isHelperElement(element) || isResultsTableElement(element) || element.id === "root") {
           return false;
         }
 
         const rect = element.getBoundingClientRect();
         const text = normalizeText(textOf(element));
-        return rect.width > 0 && rect.height > 0 && rect.left < 430 &&
+        return rect.width > 0 && rect.height > 0 &&
+          rect.height <= Math.max(900, window.innerHeight) &&
+          text.includes("totalvalueusd") &&
+          (
+            text.includes("filters") ||
+            text.includes("modifyyourdata") ||
+            element.querySelector("button, [role='button'], input")
+          );
+      })
+      .sort((a, b) => {
+        const aRect = a.getBoundingClientRect();
+        const bRect = b.getBoundingClientRect();
+        return aRect.width * aRect.height - bRect.width * bRect.height;
+      })[0] || null;
+  }
+
+  function findTotalValueFilterLabel(panel) {
+    const scope = panel || document;
+    return Array.from(scope.querySelectorAll("div, span, button, p, label"))
+      .filter((element) => {
+        const text = normalizeText(textOf(element));
+        return compactTextElement(element, 140, 320) && text.includes("totalvalueusd");
+      })
+      .sort((a, b) => {
+        const aRect = a.getBoundingClientRect();
+        const bRect = b.getBoundingClientRect();
+        const aArea = aRect.width * aRect.height;
+        const bArea = bRect.width * bRect.height;
+        return aArea - bArea || compareDocumentOrder(a, b);
+      })[0] || null;
+  }
+
+  function findCompactFilterRow(label) {
+    let row = label;
+    for (let index = 0; index < 6 && row?.parentElement; index += 1) {
+      const parent = row.parentElement;
+      const text = normalizeText(textOf(parent));
+      if (compactTextElement(parent, 180, 700) && text.includes("totalvalueusd")) {
+        row = parent;
+      }
+    }
+
+    return row;
+  }
+
+  function findTotalValueCollapseItem(label) {
+    const item = label?.closest(".ant-collapse-item");
+
+    if (item && !isResultsTableElement(item)) {
+      return item;
+    }
+
+    return Array.from(document.querySelectorAll(".ant-collapse-item"))
+      .filter((element) => {
+        const header = element.querySelector(".ant-collapse-header, [role='tab'], .ant-collapse-header-text") || element;
+        const text = normalizeText(textOf(header));
+        return !isResultsTableElement(element) && text.includes("totalvalueusd");
+      })
+      .sort(compareDocumentOrder)[0] || null;
+  }
+
+  async function applyTotalValueRangeFromCollapse(label, minValue, maxValue) {
+    const item = findTotalValueCollapseItem(label);
+
+    if (!item) {
+      return null;
+    }
+
+    const header = item.querySelector(".ant-collapse-header, [role='tab'], .ant-collapse-header-text");
+    const findInputs = () => Array.from(item.querySelectorAll("input.input-range[type='number'], input[type='number']"))
+      .filter((element) => !element.disabled && !element.readOnly && !isResultsTableElement(element))
+      .slice(0, 2);
+
+    let inputs = findInputs();
+    if (header && inputs.length < 2) {
+      clickElement(header);
+      await sleep(700);
+      inputs = findInputs();
+    }
+
+    if (inputs.length < 2) {
+      return {
+        ok: false,
+        reason: "Total Value USD collapse inputs not found",
+        item: describeElement(item),
+        header: header ? describeElement(header) : null,
+        content: item.querySelector(".ant-collapse-content") ? describeElement(item.querySelector(".ant-collapse-content")) : null,
+        inputs: Array.from(item.querySelectorAll("input")).map(describeElement)
+      };
+    }
+
+    dispatchValue(inputs[0], minValue);
+    dispatchValue(inputs[1], maxValue);
+    await sleep(250);
+
+    const addButton = Array.from(item.querySelectorAll("button, [role='button']"))
+      .filter((element) => visibleElement(element) && normalizeText(textOf(element)) === "add")
+      .sort(compareDocumentOrder)[0] || null;
+
+    if (!addButton) {
+      return {
+        ok: false,
+        reason: "Total Value USD collapse Add button not found",
+        item: describeElement(item),
+        inputs: inputs.map(describeElement),
+        buttons: Array.from(item.querySelectorAll("button, [role='button']"))
+          .filter(visibleElement)
+          .map(describeElement)
+      };
+    }
+
+    clickElement(addButton);
+    const resultsStable = await waitForResultsStable(12000);
+
+    return {
+      ok: true,
+      method: "collapse",
+      min: minValue,
+      max: maxValue,
+      item: describeElement(item),
+      inputs: inputs.map(describeElement),
+      addButton: describeElement(addButton),
+      resultsStable
+    };
+  }
+
+  async function applyTotalValueRange(minValue, maxValue) {
+    const existingApplied = Array.from(document.querySelectorAll("div, span, p"))
+      .find((element) => {
+        const text = normalizeText(textOf(element));
+        return compactTextElement(element, 180, 500) &&
           text.includes("totalvalueusd") &&
           text.includes(String(minValue).replace(/\D/g, "")) &&
           text.includes(String(maxValue).replace(/\D/g, ""));
@@ -948,92 +1053,89 @@
       await sleep(700);
     }
 
-    const leftPanelElements = Array.from(document.querySelectorAll("div, section, aside"))
-      .filter((element) => {
-        if (isHelperElement(element)) {
-          return false;
-        }
-
-        const rect = element.getBoundingClientRect();
-        const text = normalizeText(textOf(element));
-        return rect.width > 0 && rect.height > 0 && rect.left < 430 && text.includes("filters");
-      })
-      .sort((a, b) => {
-        const aRect = a.getBoundingClientRect();
-        const bRect = b.getBoundingClientRect();
-        return bRect.height * bRect.width - aRect.height * aRect.width;
-      });
-
-    const panel = leftPanelElements[0] || document.body;
-
-    const label = Array.from(panel.querySelectorAll("div, span, button, p"))
-      .filter((element) => {
-        if (isHelperElement(element)) {
-          return false;
-        }
-
-        const rect = element.getBoundingClientRect();
-        const text = normalizeText(textOf(element));
-        return rect.width > 0 && rect.height > 0 && rect.left < 430 && text.includes("totalvalueusd");
-      })
-      .sort((a, b) => {
-        const aRect = a.getBoundingClientRect();
-        const bRect = b.getBoundingClientRect();
-        return aRect.width * aRect.height - bRect.width * bRect.height;
-      })[0];
+    const panel = findTotalValueFilterPanel();
+    const label = findTotalValueFilterLabel(panel) || findTotalValueFilterLabel(document);
 
     if (!label) {
       return {
         ok: false,
         reason: "Total Value USD filter not found",
-        panel: panel === document.body ? "body" : describeElement(panel)
+        panel: panel ? describeElement(panel) : null,
+        tableHeaders: Array.from(document.querySelectorAll("[role='columnheader'], th"))
+          .filter((element) => normalizeText(textOf(element)).includes("totalvalueusd"))
+          .slice(0, 5)
+          .map(describeElement)
       };
     }
 
     label.scrollIntoView({ block: "center", inline: "nearest" });
     await new Promise((resolve) => setTimeout(resolve, 300));
 
-    let row = label;
-    for (let index = 0; index < 4 && row.parentElement; index += 1) {
-      const parent = row.parentElement;
-      const rect = parent.getBoundingClientRect();
-      const text = normalizeText(textOf(parent));
-      if (rect.left < 430 && rect.width <= 430 && rect.height <= 90 && text.includes("totalvalueusd")) {
-        row = parent;
-      }
+    const collapseResult = await applyTotalValueRangeFromCollapse(label, minValue, maxValue);
+    if (collapseResult) {
+      return collapseResult;
     }
+
+    const row = findCompactFilterRow(label);
 
     const rowRect = row.getBoundingClientRect();
     const plus = Array.from(row.querySelectorAll("button, span, div, [role='button']"))
       .filter((element) => {
-        if (isHelperElement(element)) {
+        if (isHelperElement(element) || isResultsTableElement(element)) {
           return false;
         }
 
         const rect = element.getBoundingClientRect();
         const text = textOf(element).trim();
         const aria = normalizeText(element.getAttribute("aria-label") || "");
+        const title = normalizeText(element.getAttribute("title") || "");
+        const className = normalizeText(String(element.className || ""));
+        const looksInteractive = element.matches("button, [role='button']") ||
+          element.closest("button, [role='button']") ||
+          className.includes("add") ||
+          className.includes("plus");
+        const looksLikeBlankIcon = !text && looksInteractive && rect.width <= 80 && rect.height <= 80;
         return rect.width > 0 && rect.height > 0 &&
-          rect.left > rowRect.left + rowRect.width * 0.65 &&
           !aria.includes("delete") &&
-          (text === "+" || text === "" || normalizeText(text).includes("add"));
+          !title.includes("delete") &&
+          !className.includes("delete") &&
+          (text === "+" || normalizeText(text).includes("add") || aria.includes("add") || title.includes("add") || looksLikeBlankIcon);
       })
-      .sort((a, b) => b.getBoundingClientRect().left - a.getBoundingClientRect().left)[0];
+      .sort((a, b) => {
+        const aRect = a.getBoundingClientRect();
+        const bRect = b.getBoundingClientRect();
+        const aDistance = Math.abs(aRect.top - rowRect.top);
+        const bDistance = Math.abs(bRect.top - rowRect.top);
+        return aDistance - bDistance || bRect.left - aRect.left;
+      })[0];
 
-    clickAt(plus || row, 0.92);
+    if (!plus) {
+      return {
+        ok: false,
+        reason: "Total Value USD add control not found",
+        label: describeElement(label),
+        row: describeElement(row),
+        panel: panel ? describeElement(panel) : null,
+        rowControls: Array.from(row.querySelectorAll("button, span, div, [role='button']"))
+          .filter((element) => !isHelperElement(element) && !isResultsTableElement(element) && visibleElement(element))
+          .slice(0, 20)
+          .map(describeElement)
+      };
+    }
+
+    clickElement(plus);
     await new Promise((resolve) => setTimeout(resolve, 800));
 
     const findTotalValueInputs = () => {
       const expandedRect = row.getBoundingClientRect();
       return Array.from(document.querySelectorAll("input"))
         .filter((element) => {
-          if (isHelperElement(element) || element.disabled || element.readOnly) {
+          if (isHelperElement(element) || isResultsTableElement(element) || element.disabled || element.readOnly) {
             return false;
           }
 
           const rect = element.getBoundingClientRect();
           return rect.width > 0 && rect.height > 0 &&
-            rect.left < 520 &&
             rect.top > expandedRect.top - 20 &&
             rect.top < expandedRect.top + 420;
         })
@@ -1056,7 +1158,12 @@
         reason: "Total Value USD min/max inputs not found",
         label: describeElement(label),
         row: describeElement(row),
-        plus: plus ? describeElement(plus) : null
+        plus: plus ? describeElement(plus) : null,
+        panel: panel ? describeElement(panel) : null,
+        nearbyInputs: Array.from(document.querySelectorAll("input"))
+          .filter((element) => !isHelperElement(element) && !isResultsTableElement(element))
+          .slice(0, 20)
+          .map(describeElement)
       };
     }
 
@@ -1071,7 +1178,7 @@
         }
 
         const rect = element.getBoundingClientRect();
-        return rect.width > 0 && rect.height > 0 && rect.left < 420 && normalizeText(textOf(element)) === "add";
+        return rect.width > 0 && rect.height > 0 && normalizeText(textOf(element)) === "add";
       })[0];
 
     if (!addButton) {
@@ -1207,16 +1314,12 @@
       };
     }
 
-    const switchX = Math.max(220, Math.min(labelRect.right - 30, 280));
-    const switchY = Math.min(window.innerHeight - 20, Math.max(20, labelRect.top + labelRect.height / 2));
-    const switchTarget = document.elementFromPoint(switchX, switchY);
+    const switchTarget = label.closest("label, .radio-filler, .ant-switch, [role='switch']")?.querySelector(
+      "input[type='checkbox'], input[type='radio'], [role='checkbox'], [role='switch'], .slider, .ant-switch"
+    ) || label.closest("label, .radio-filler, .ant-switch, [role='switch']");
 
     if (switchTarget) {
-      clickPoint({
-        element: switchTarget,
-        x: switchX,
-        y: switchY
-      });
+      clickElement(switchTarget);
 
       const resultsStable = await waitForResultsStable(12000);
 
@@ -1296,64 +1399,16 @@
   }
 
   function clickFirstImporter() {
-    const importerHeader = Array.from(document.querySelectorAll("th, div, span"))
-      .filter((element) => {
-        if (isHelperElement(element)) {
-          return false;
-        }
-
-        const rect = element.getBoundingClientRect();
-        return rect.width > 0 && rect.height > 0 && normalizeText(textOf(element)) === "importer";
-      })
-      .sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top)[0];
-
-    const headerRect = importerHeader?.getBoundingClientRect();
-    const candidates = Array.from(document.querySelectorAll("a, button, [role='button'], span, div"))
-      .filter((element) => {
-        if (isHelperElement(element)) {
-          return false;
-        }
-
-        const rect = element.getBoundingClientRect();
-        const text = textOf(element);
-        const looksLikeCompany = text.length > 2 && /[a-z]/i.test(text) && ![
-          "check risk",
-          "view shipments",
-          "supply chain",
-          "address"
-        ].includes(text.trim().toLowerCase());
-
-        if (!looksLikeCompany || rect.width <= 0 || rect.height <= 0) {
-          return false;
-        }
-
-        if (!headerRect) {
-          return rect.left > 450 && rect.top > 350;
-        }
-
-        const inImporterColumn = rect.left >= headerRect.left - 20 && rect.left <= headerRect.right + 40;
-        const belowHeader = rect.top > headerRect.bottom;
-        const nearFirstRows = rect.top < headerRect.bottom + 180;
-
-        return inImporterColumn && belowHeader && nearFirstRows;
-      })
-      .sort((a, b) => {
-        const aRect = a.getBoundingClientRect();
-        const bRect = b.getBoundingClientRect();
-        return aRect.top - bRect.top || aRect.left - bRect.left;
-      });
-
-    const target = candidates[0];
+    const target = getImporterCandidates()[0];
 
     if (!target) {
       return {
         ok: false,
-        reason: "first importer not found",
-        importerHeader: importerHeader ? describeElement(importerHeader) : null
+        reason: "first importer not found"
       };
     }
 
-    const companyName = textOf(target);
+    const companyName = target.getAttribute("title") || textOf(target);
     const opened = openElementInSameTab(target);
 
     return {
@@ -1407,6 +1462,26 @@
       });
   }
 
+  function importerRowNumberFromElement(element) {
+    const row = element?.closest(".G-table-row, [role='row'], tr");
+    const numberCell = row ? Array.from(row.querySelectorAll(".td[title], [role='cell'][title], td[title], div[title]"))
+      .find((cell) => {
+        const title = String(cell.getAttribute("title") || "").trim();
+        return /^\d+$/.test(title);
+      }) : null;
+    const title = numberCell?.getAttribute("title") || "";
+    const parsed = Number.parseInt(title, 10);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  function importerCandidateSummary(candidates) {
+    return candidates.map((candidate) => ({
+      company: candidate.getAttribute("title") || textOf(candidate),
+      rowNumber: importerRowNumberFromElement(candidate),
+      key: companyKeyFromElement(candidate)
+    }));
+  }
+
   async function waitForUrlPart(part, timeoutMs = 20000) {
     return Boolean(await waitUntil(() => location.href.includes(part), timeoutMs, 300, 1000));
   }
@@ -1428,8 +1503,54 @@
     return Boolean(candidates.length);
   }
 
+  function listPageSnapshot() {
+    const candidates = getImporterCandidates();
+
+    return {
+      url: location.href,
+      page: currentPaginationPage(),
+      signature: importerListSignature(),
+      range: candidateRowRange(candidates),
+      candidateCount: candidates.length
+    };
+  }
+
   function findNextPageButton() {
-    return Array.from(document.querySelectorAll(".pagination a, .pagination button, a, button, [role='button']"))
+    const directNext = Array.from(document.querySelectorAll(
+      "a[aria-label='Next page'], button[aria-label='Next page'], a[rel='next'], button[rel='next']"
+    )).find((element) => {
+      if (isHelperElement(element)) {
+        return false;
+      }
+
+      const rect = element.getBoundingClientRect();
+      const className = String(element.className || "");
+      const disabled = element.getAttribute("aria-disabled") === "true" ||
+        element.getAttribute("disabled") !== null ||
+        element.closest(".disabled, .ant-pagination-disabled, [aria-disabled='true']") ||
+        /\bdisabled\b/.test(className) ||
+        element.disabled;
+
+      return rect.width > 0 && rect.height > 0 && !disabled;
+    });
+
+    if (directNext) {
+      return directNext;
+    }
+
+    const paginationContainers = Array.from(document.querySelectorAll(
+      ".pagination, .ant-pagination, [class*='pagination'], nav[aria-label]"
+    )).filter((element) => visibleElement(element));
+
+    const scopedCandidates = paginationContainers.flatMap((container) => {
+      return Array.from(container.querySelectorAll("a, button, [role='button']"));
+    });
+
+    const candidates = scopedCandidates.length
+      ? scopedCandidates
+      : Array.from(document.querySelectorAll(".pagination a, .pagination button, .ant-pagination a, .ant-pagination button"));
+
+    return candidates
       .filter((element) => {
         if (isHelperElement(element)) {
           return false;
@@ -1438,39 +1559,459 @@
         const rect = element.getBoundingClientRect();
         const text = normalizeText(textOf(element));
         const aria = normalizeText(element.getAttribute("aria-label") || "");
+        const title = normalizeText(element.getAttribute("title") || "");
+        const className = String(element.className || "");
         const disabled = element.getAttribute("aria-disabled") === "true" ||
-          element.closest(".disabled") ||
+          element.getAttribute("disabled") !== null ||
+          element.closest(".disabled, .ant-pagination-disabled, [aria-disabled='true']") ||
+          /\bdisabled\b/.test(className) ||
           element.disabled;
 
-        return rect.width > 0 && rect.height > 0 && !disabled && (text === "next" || aria === "nextpage");
+        return rect.width > 0 && rect.height > 0 && !disabled && (
+          element.getAttribute("rel") === "next" ||
+          text === "next" ||
+          aria === "nextpage" ||
+          aria === "next" ||
+          title === "nextpage" ||
+          title === "next"
+        );
       })
-      .sort((a, b) => b.getBoundingClientRect().top - a.getBoundingClientRect().top)[0];
+      .sort((a, b) => {
+        const aRect = a.getBoundingClientRect();
+        const bRect = b.getBoundingClientRect();
+        return bRect.top - aRect.top || bRect.right - aRect.right;
+      })[0];
+  }
+
+  function isDisabledPaginationControl(element) {
+    const className = String(element?.className || "");
+    return !element ||
+      element.getAttribute("aria-disabled") === "true" ||
+      element.getAttribute("disabled") !== null ||
+      element.closest(".disabled, .ant-pagination-disabled, [aria-disabled='true']") ||
+      /\bdisabled\b/.test(className) ||
+      element.disabled;
+  }
+
+  function paginationControls() {
+    const containers = Array.from(document.querySelectorAll(
+      ".pagination, .EG-pagination, .ant-pagination, [class*='pagination'], nav[aria-label]"
+    )).filter((element) => visibleElement(element));
+    const scoped = containers.flatMap((container) => {
+      return Array.from(container.querySelectorAll("a, button, [role='button']"));
+    });
+
+    return (scoped.length ? scoped : Array.from(document.querySelectorAll(
+      ".pagination a, .pagination button, .EG-pagination a, .EG-pagination button, .ant-pagination a, .ant-pagination button"
+    ))).filter((element) => visibleElement(element) && !isDisabledPaginationControl(element));
+  }
+
+  function findPaginationPageButton(pageNumber) {
+    const target = String(pageNumber);
+
+    return paginationControls().find((element) => {
+      const text = textOf(element).trim();
+      const aria = element.getAttribute("aria-label") || "";
+      const ariaPage = aria.match(/page\s+(\d+)/i)?.[1] || "";
+
+      return text === target || ariaPage === target;
+    }) || null;
+  }
+
+  function findPaginationJumpButton(direction = "forward") {
+    const expected = direction === "backward" ? "jumpbackward" : "jumpforward";
+
+    const controls = paginationControls();
+    const preferred = controls.find((element) => {
+      const text = normalizeText(textOf(element));
+      const aria = normalizeText(element.getAttribute("aria-label") || "");
+      const rel = normalizeText(element.getAttribute("rel") || "");
+      const opposite = direction === "backward" ? "jumpforward" : "jumpbackward";
+
+      if (aria.includes(opposite) || rel.includes(opposite)) {
+        return false;
+      }
+
+      return aria === expected ||
+        rel === expected ||
+        (direction === "forward" && aria.includes("jumpforward")) ||
+        (direction === "backward" && aria.includes("jumpbackward"));
+    });
+
+    if (preferred) {
+      return preferred;
+    }
+
+    const ellipses = controls.filter((element) => normalizeText(textOf(element)) === "...");
+    return direction === "backward" ? ellipses[0] || null : ellipses[ellipses.length - 1] || null;
+  }
+
+  function currentPaginationPage() {
+    const current = document.querySelector(
+      "a[aria-current='page'], button[aria-current='page'], .pagination li.active a, .pagination li.active button, .pagination li.active, .EG-pagination li.active a, .EG-pagination li.active button, .EG-pagination li.active"
+    );
+    if (!current) {
+      return null;
+    }
+
+    const aria = current.getAttribute("aria-label") || "";
+    const ariaMatch = aria.match(/page\s+(\d+)/i);
+    if (ariaMatch) {
+      const parsedAria = Number.parseInt(ariaMatch[1], 10);
+      if (Number.isFinite(parsedAria)) {
+        return parsedAria;
+      }
+    }
+
+    const text = (current.textContent || "").trim();
+    const parsed = Number.parseInt(text, 10);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  function describePaginationCandidate(element) {
+    if (!element) {
+      return null;
+    }
+
+    return {
+      ...describeElement(element),
+      title: element.getAttribute("title") || "",
+      ariaDisabled: element.getAttribute("aria-disabled") || "",
+      className: String(element.className || "").slice(0, 160)
+    };
+  }
+
+  function inferImporterPageSize(rowRange = candidateRowRange(getImporterCandidates())) {
+    if (Number.isFinite(rowRange.min) && Number.isFinite(rowRange.max) && rowRange.max >= rowRange.min) {
+      const visibleSize = rowRange.max - rowRange.min + 1;
+      if (visibleSize > 0) {
+        return visibleSize;
+      }
+    }
+
+    return 10;
+  }
+
+  function importerPageForRow(rowNumber, pageSize = 10) {
+    const parsed = Number.parseInt(rowNumber, 10);
+    const size = Math.max(1, Number.parseInt(pageSize, 10) || 10);
+    return Math.max(1, Math.ceil(parsed / size) || 1);
+  }
+
+  async function waitForPaginationChange(before, timeoutMs = 25000) {
+    const started = Date.now();
+
+    while (Date.now() - started < timeoutMs) {
+      if (await getLocalGuiStopRequested()) {
+        return null;
+      }
+
+      const candidates = getImporterCandidates();
+      const current = listPageSnapshot();
+      const pageChanged = Number.isFinite(before.page) && Number.isFinite(current.page) && current.page !== before.page;
+      const rangeChanged = Number.isFinite(before.range.max) && Number.isFinite(current.range.max) && current.range.max !== before.range.max;
+      const signatureChanged = Boolean(current.signature && before.signature && current.signature !== before.signature);
+
+      if (candidates.length && current.signature && !pageLooksBusy() && (pageChanged || rangeChanged || signatureChanged)) {
+        return candidates;
+      }
+
+      await sleep(600);
+    }
+
+    return null;
+  }
+
+  async function waitForImporterPageReady(targetPage, expectedRowNumber = null, timeoutMs = 30000) {
+    const started = Date.now();
+
+    while (Date.now() - started < timeoutMs) {
+      if (await getLocalGuiStopRequested()) {
+        return null;
+      }
+
+      const candidates = getImporterCandidates();
+      const current = listPageSnapshot();
+      const reachedTargetPage = Number.isFinite(current.page) && current.page === targetPage;
+      const range = current.range || {};
+      const expectedRowVisible = !Number.isFinite(expectedRowNumber) ||
+        (Number.isFinite(range.min) && Number.isFinite(range.max) && expectedRowNumber >= range.min && expectedRowNumber <= range.max);
+
+      if (candidates.length && current.signature && !pageLooksBusy() && reachedTargetPage && expectedRowVisible) {
+        return candidates;
+      }
+
+      await sleep(600);
+    }
+
+    return null;
+  }
+
+  function findImporterPageNavigationControl(targetPage, currentPage) {
+    let control = findPaginationPageButton(targetPage);
+    let mode = "page-button";
+
+    if (!control) {
+      if (!Number.isFinite(currentPage) || targetPage > currentPage) {
+        control = findPaginationJumpButton("forward");
+        mode = "jump-forward";
+        if (!control) {
+          control = findNextPageButton();
+          mode = "next";
+        }
+      } else {
+        control = findPaginationJumpButton("backward") ||
+          findPaginationPageButton(Math.max(1, targetPage));
+        mode = "jump-backward";
+      }
+    }
+
+    return { control, mode };
+  }
+
+  async function waitForImporterPageNavigationControl(targetPage, currentPage, timeoutMs = 10000) {
+    const started = Date.now();
+
+    while (Date.now() - started < timeoutMs) {
+      if (await getLocalGuiStopRequested()) {
+        return null;
+      }
+
+      const found = findImporterPageNavigationControl(targetPage, currentPage);
+      if (found.control) {
+        await sleep(300);
+        return found;
+      }
+
+      await sleep(350);
+    }
+
+    return null;
+  }
+
+  async function goToImporterPage(targetPage, expectedRowNumber = null) {
+    const target = Math.max(1, Number.parseInt(targetPage, 10) || 1);
+    const expectedRow = Number.parseInt(expectedRowNumber, 10);
+    const attempts = [];
+
+    for (let attempt = 1; attempt <= 30; attempt += 1) {
+      const stopped = await abortIfGuiStopRequested();
+      if (stopped) {
+        return stopped;
+      }
+
+      const currentPage = currentPaginationPage();
+      const before = listPageSnapshot();
+
+      if (currentPage === target) {
+        const candidates = await waitForImporterPageReady(target, expectedRow, 15000);
+        return {
+          ok: Boolean(candidates.length),
+          reason: candidates.length ? "" : "Target page reached but expected importer rows were not ready.",
+          targetPage: target,
+          expectedRowNumber: Number.isFinite(expectedRow) ? expectedRow : null,
+          currentPage,
+          candidateCount: candidates.length,
+          rowRange: candidateRowRange(getImporterCandidates()),
+          attempts
+        };
+      }
+
+      let { control, mode } = findImporterPageNavigationControl(target, currentPage);
+
+      if (!control) {
+        await waitForImporterResultsReady(12000, { recoverRecordNotFound: false });
+        const waited = await waitForImporterPageNavigationControl(target, currentPaginationPage(), 10000);
+        control = waited?.control || null;
+        mode = waited?.mode || mode;
+      }
+
+      if (!control) {
+        return {
+          ok: false,
+          reason: `Page ${target} control not found.`,
+          targetPage: target,
+          currentPage,
+          currentSnapshot: listPageSnapshot(),
+          visibleControls: paginationControls().map((element) => ({
+            text: textOf(element),
+            ariaLabel: element.getAttribute("aria-label") || "",
+            rel: element.getAttribute("rel") || "",
+            className: String(element.className || "").slice(0, 80)
+          })),
+          attempts
+        };
+      }
+
+      clickElement(control);
+      await waitForPaginationChange(before, 30000);
+      const stoppedAfterClick = await abortIfGuiStopRequested();
+      if (stoppedAfterClick) {
+        return stoppedAfterClick;
+      }
+
+      const after = listPageSnapshot();
+      const recordNotFound = pageShowsRecordNotFound();
+
+      attempts.push({
+        attempt,
+        mode,
+        before,
+        after,
+        clicked: describePaginationCandidate(control),
+        recordNotFound
+      });
+
+      if (recordNotFound) {
+        return {
+          ok: false,
+          reason: `Importer page ${target} showed record not found during page jump.`,
+          targetPage: target,
+          expectedRowNumber: Number.isFinite(expectedRow) ? expectedRow : null,
+          currentPage: after.page,
+          rowRange: after.range,
+          attempts
+        };
+      }
+
+      if (after.page === target) {
+        const candidates = await waitForImporterPageReady(target, expectedRow, 30000);
+        const finalSnapshot = listPageSnapshot();
+        attempts[attempts.length - 1].final = finalSnapshot;
+
+        if (!candidates?.length) {
+          return {
+            ok: false,
+            reason: `Importer page ${target} opened but expected rows did not become ready.`,
+            targetPage: target,
+            expectedRowNumber: Number.isFinite(expectedRow) ? expectedRow : null,
+            currentPage: finalSnapshot.page,
+            rowRange: finalSnapshot.range,
+            attempts
+          };
+        }
+
+        return {
+          ok: true,
+          reason: "",
+          targetPage: target,
+          expectedRowNumber: Number.isFinite(expectedRow) ? expectedRow : null,
+          currentPage: finalSnapshot.page,
+          candidateCount: candidates.length,
+          rowRange: finalSnapshot.range,
+          attempts
+        };
+      }
+
+      await sleep(800);
+    }
+
+    return {
+      ok: false,
+      reason: `Could not reach importer page ${target}.`,
+      targetPage: target,
+      expectedRowNumber: Number.isFinite(expectedRow) ? expectedRow : null,
+      currentPage: currentPaginationPage(),
+      rowRange: candidateRowRange(getImporterCandidates()),
+      attempts
+    };
   }
 
   async function goNextImporterPage() {
-    const beforeSignature = importerListSignature();
-    const next = findNextPageButton();
+    const before = listPageSnapshot();
+    const attempts = [];
 
-    if (!next) {
-      return false;
-    }
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      const next = findNextPageButton();
 
-    clickElement(next);
-    const candidates = await waitUntil(() => {
-      const currentCandidates = getImporterCandidates();
-      const currentSignature = importerListSignature();
+      if (!next) {
+        attempts.push({
+          attempt,
+          ok: false,
+          reason: "Next page button not found.",
+          snapshot: listPageSnapshot()
+        });
 
-      if (currentCandidates.length && currentSignature && currentSignature !== beforeSignature && !pageLooksBusy()) {
-        return currentCandidates;
+        if (attempt === 1) {
+          await selectImportersTab();
+          await waitForImporterResultsReady(12000);
+          continue;
+        }
+
+        break;
       }
 
-      return null;
-    }, 25000, 600, 1000);
+      const clicked = describePaginationCandidate(next);
+      clickElement(next);
 
-    return Boolean(candidates.length);
+      const candidates = await waitUntil(() => {
+        const currentCandidates = getImporterCandidates();
+        const current = listPageSnapshot();
+        const pageChanged = Number.isFinite(before.page) && Number.isFinite(current.page) && current.page !== before.page;
+        const rangeChanged = Number.isFinite(before.range.max) && Number.isFinite(current.range.max) && current.range.max !== before.range.max;
+        const signatureChanged = Boolean(current.signature && before.signature && current.signature !== before.signature);
+
+        if (currentCandidates.length && current.signature && !pageLooksBusy() && (signatureChanged || pageChanged || rangeChanged)) {
+          return currentCandidates;
+        }
+
+        return null;
+      }, attempt === 1 ? 25000 : 35000, 600, 1500);
+
+      const after = listPageSnapshot();
+      attempts.push({
+        attempt,
+        ok: Boolean(candidates?.length),
+        clicked,
+        after
+      });
+
+      if (candidates?.length) {
+        await waitForImporterResultsReady(15000);
+        return {
+          ok: true,
+          reason: "",
+          beforeSignature: before.signature,
+          afterSignature: after.signature,
+          beforeUrl: before.url,
+          afterUrl: after.url,
+          beforePage: before.page,
+          afterPage: after.page,
+          beforeRange: before.range,
+          afterRange: after.range,
+          clicked,
+          currentPage: after.page,
+          candidateCount: after.candidateCount,
+          attempts
+        };
+      }
+
+      await sleep(1200 * attempt);
+      await selectImportersTab();
+      await waitForImporterResultsReady(12000);
+    }
+
+    const after = listPageSnapshot();
+    return {
+      ok: false,
+      reason: "Importer list did not change after clicking next page.",
+      beforeSignature: before.signature,
+      afterSignature: after.signature,
+      beforeUrl: before.url,
+      afterUrl: after.url,
+      beforePage: before.page,
+      afterPage: after.page,
+      beforeRange: before.range,
+      afterRange: after.range,
+      currentPage: after.page,
+      candidateCount: after.candidateCount,
+      attempts
+    };
   }
 
-  async function waitForImporterResultsReady(timeoutMs = 25000) {
+  async function waitForImporterResultsReady(timeoutMs = 25000, options = {}) {
+    const recoverRecordNotFound = options.recoverRecordNotFound !== false;
+
     await waitForResultsStable(Math.min(timeoutMs, 12000));
 
     let candidates = await waitForImporterCandidates(5000);
@@ -1481,6 +2022,18 @@
     await selectImportersTab();
     await waitForResultsStable(12000);
     candidates = await waitForImporterCandidates(8000);
+    if (candidates.length) {
+      return candidates;
+    }
+
+    if (recoverRecordNotFound && pageShowsRecordNotFound()) {
+      await postLocalGuiLog("바이어 목록이 비어 있어 페이지를 새로고침합니다.", "복구 시도");
+      const recovered = await recoverRecordNotFoundResults();
+      if (recovered.length) {
+        return recovered;
+      }
+    }
+
     return candidates;
   }
 
@@ -1497,12 +2050,550 @@
     return candidates || [];
   }
 
+  function pageShowsRecordNotFound() {
+    const text = normalizeText(textOf(document.body));
+    return text.includes("recordnotfound") ||
+      text.includes("recordsnotfound") ||
+      text.includes("norecordfound") ||
+      text.includes("norecordsfound") ||
+      text.includes("nodatafound");
+  }
+
+  async function recoverRecordNotFoundResults(maxAttempts = 2) {
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      if (await getLocalGuiStopRequested()) {
+        return [];
+      }
+
+      location.reload();
+      const returned = await waitForUrlPart("/search-results", 45000);
+      if (!returned) {
+        continue;
+      }
+
+      await sleep(2500);
+      await selectImportersTab();
+      await waitForResultsStable(20000);
+
+      const candidates = await waitForImporterCandidates(15000);
+      if (candidates.length) {
+        await postLocalGuiLog(`바이어 목록 복구 완료: ${candidates.length}개 확인`, "복구 완료");
+        return candidates;
+      }
+    }
+
+    return [];
+  }
+
   function companyKeyFromElement(element) {
     return normalizeText(element?.getAttribute("title") || (element ? textOf(element) : ""));
   }
 
+  function companyKeyFromName(name) {
+    return normalizeText(name);
+  }
+
   function findNextUnvisitedImporter(candidates, visitedCompanyKeys) {
     return candidates.find((candidate) => !visitedCompanyKeys.has(companyKeyFromElement(candidate))) || null;
+  }
+
+  function findNextImporterByRowNumber(candidates, startRowNumber, visitedCompanyKeys) {
+    const withRowNumbers = candidates
+      .map((candidate) => ({
+        candidate,
+        rowNumber: importerRowNumberFromElement(candidate),
+        companyKey: companyKeyFromElement(candidate)
+      }))
+      .filter((item) => Number.isFinite(item.rowNumber))
+      .sort((a, b) => a.rowNumber - b.rowNumber);
+
+    if (!withRowNumbers.length) {
+      return findNextUnvisitedImporter(candidates, visitedCompanyKeys);
+    }
+
+    return withRowNumbers.find((item) => {
+      return item.rowNumber >= startRowNumber && !visitedCompanyKeys.has(item.companyKey);
+    })?.candidate || null;
+  }
+
+  function importerCandidateIdentity(candidate) {
+    return {
+      candidate,
+      listCompanyName: candidate?.getAttribute("title") || textOf(candidate),
+      rowNumber: importerRowNumberFromElement(candidate),
+      companyKey: companyKeyFromElement(candidate)
+    };
+  }
+
+  function sortedImporterCandidateIdentities(candidates, minimumRowNumber = 1) {
+    return candidates
+      .map(importerCandidateIdentity)
+      .filter((item) => {
+        return !Number.isFinite(item.rowNumber) || item.rowNumber >= minimumRowNumber;
+      })
+      .sort((a, b) => {
+        const aRow = Number.isFinite(a.rowNumber) ? a.rowNumber : Number.MAX_SAFE_INTEGER;
+        const bRow = Number.isFinite(b.rowNumber) ? b.rowNumber : Number.MAX_SAFE_INTEGER;
+        return aRow - bRow;
+      });
+  }
+
+  function pickResumeAnchorIdentity(identities, anchorKey, checked) {
+    const unchecked = identities.filter((item) => {
+      const rowPart = Number.isFinite(item.rowNumber) ? item.rowNumber : "rowless";
+      const checkKey = `${rowPart}:${item.companyKey}`;
+      return item.companyKey && !checked.has(checkKey);
+    });
+
+    const listMatched = unchecked.find((item) => item.companyKey === anchorKey);
+    if (listMatched) {
+      return {
+        ...listMatched,
+        listNameMatchedAnchor: true
+      };
+    }
+
+    const sequential = unchecked[0] || null;
+    return sequential
+      ? {
+        ...sequential,
+        listNameMatchedAnchor: false
+      }
+      : null;
+  }
+
+  function summarizeImporterIdentities(identities) {
+    return identities.map((item) => {
+      const marker = item.companyKey ? "" : "!";
+      return `${item.rowNumber || "-"}:${marker}${item.listCompanyName}`;
+    }).join(" | ");
+  }
+
+  async function inspectResumeAnchorProfile(identity, state) {
+    const stoppedBeforeLog = await abortIfGuiStopRequested();
+    if (stoppedBeforeLog) {
+      return {
+        stopped: true,
+        reason: stoppedBeforeLog.reason,
+        candidates: getImporterCandidates()
+      };
+    }
+    await postLocalGuiLog(`이어하기 위치 확인 중: ${identity.rowNumber || "-"}번 ${identity.listCompanyName}`);
+
+    state.phase = "resumeAnchor";
+        state.summary.diagnostics.resumeAnchorChecking = {
+          rowNumber: identity.rowNumber || null,
+          listCompanyName: identity.listCompanyName,
+          listNameMatchedAnchor: Boolean(identity.listNameMatchedAnchor)
+        };
+    writeCollectionState(state);
+
+    const stoppedBeforeOpen = await abortIfGuiStopRequested();
+    if (stoppedBeforeOpen) {
+      return {
+        stopped: true,
+        reason: stoppedBeforeOpen.reason,
+        candidates: getImporterCandidates()
+      };
+    }
+
+    openElementInSameTab(identity.candidate);
+    const opened = await waitForUrlPart("/company-profile", 30000);
+
+    if (!opened) {
+      return {
+        ok: false,
+        reason: "Resume anchor profile did not open.",
+        identity,
+        candidates: getImporterCandidates()
+      };
+    }
+
+    const profileUrl = location.href;
+    const ready = await waitForCompanyProfileReady(45000);
+    const overview = ready.ready ? extractOverviewProfile() : null;
+    const profileCompanyCandidates = overview?.raw?.profileCompanyCandidates || [];
+    const matchedProfileCompanyName = profileCompanyCandidates.find((candidate) => {
+      return companyKeyFromName(candidate) === state.resumeAnchorBuyerKey;
+    }) || "";
+    const profileCompanyName = matchedProfileCompanyName || overview?.excelPinkBlock?.Company_Name || "";
+    const profileCompanyKey = companyKeyFromName(profileCompanyName);
+
+    state.phase = "results";
+    writeCollectionState(state);
+
+    const returned = await goBackToResults(state.resultsUrl);
+    const candidates = returned
+      ? await waitForImporterResultsReady(25000)
+      : getImporterCandidates();
+
+    return {
+      ok: Boolean(profileCompanyKey),
+      matched: profileCompanyKey === state.resumeAnchorBuyerKey,
+      identity,
+      profileUrl,
+      profileCompanyName,
+      profileCompanyKey,
+      profileCompanyCandidates,
+      ready,
+      candidates
+    };
+  }
+
+  async function verifyResumeAnchorOnProfilePage(state) {
+    const checking = state.summary?.diagnostics?.resumeAnchorChecking || {};
+    const profileReady = await waitForCompanyProfileReady(45000);
+    const profileUrl = location.href;
+
+    if (profileReady.stopped) {
+      return {
+        stopped: true,
+        reason: "Stopped by GUI request."
+      };
+    }
+
+    const overview = profileReady.ready ? extractOverviewProfile() : null;
+    const profileCompanyCandidates = overview?.raw?.profileCompanyCandidates || [];
+    const matchedProfileCompanyName = profileCompanyCandidates.find((candidate) => {
+      return companyKeyFromName(candidate) === state.resumeAnchorBuyerKey;
+    }) || "";
+    const profileCompanyName = matchedProfileCompanyName || overview?.excelPinkBlock?.Company_Name || "";
+    const profileCompanyKey = companyKeyFromName(profileCompanyName);
+    const matched = profileCompanyKey === state.resumeAnchorBuyerKey;
+
+    state.summary.diagnostics.resumeAnchorLastCheck = {
+      excelFileIndex: state.resumeAnchorIndex || null,
+      browserRowNumber: checking.rowNumber || null,
+      nextBrowserRowNumber: Number.isFinite(Number(checking.rowNumber)) ? Number(checking.rowNumber) + 1 : null,
+      listCompanyName: checking.listCompanyName || "",
+      listNameMatchedAnchor: Boolean(checking.listNameMatchedAnchor),
+      profileCompanyName,
+      profileCompanyCandidates,
+      matched,
+      profileUrl,
+      ready: profileReady
+    };
+
+    await postLocalGuiRawLog({
+      type: "resume-anchor-profile-check",
+      url: location.href,
+      expected: {
+        buyerName: state.resumeAnchorBuyerName,
+        key: state.resumeAnchorBuyerKey
+      },
+      list: {
+        rowNumber: checking.rowNumber || null,
+        companyName: checking.listCompanyName || "",
+        listNameMatchedAnchor: Boolean(checking.listNameMatchedAnchor)
+      },
+      profile: {
+        companyName: profileCompanyName,
+        key: profileCompanyKey,
+        candidates: profileCompanyCandidates,
+        ready: profileReady
+      },
+      matched
+    });
+
+    /*
+    await postLocalGuiLog(
+      `이어하기 상세 2차 확인: 목록명 ${checking.listCompanyName || "-"}, 상세페이지명 ${profileCompanyName || "(empty)"}, 결과 ${matched ? "일치" : "불일치"}`,
+      "이어하기"
+    );
+
+    */
+    await postLocalGuiLog(
+      `Resume profile check: list "${checking.listCompanyName || "-"}", profile "${profileCompanyName || "(empty)"}", result ${matched ? "matched" : "not matched"}`,
+      "Resume"
+    );
+
+    if (!matched) {
+      const profileName = profileCompanyName || "(empty)";
+      state.active = false;
+      state.summary.ok = false;
+      state.summary.reason = checking.listNameMatchedAnchor
+        ? `List-name anchor candidate did not match profile name: ${checking.listCompanyName || ""} -> ${profileName}`
+        : "Resume anchor profile did not match.";
+      state.summary.diagnostics.resumeAnchor = {
+        found: false,
+        stoppedAtListNameMatch: Boolean(checking.listNameMatchedAnchor),
+        buyerName: state.resumeAnchorBuyerName,
+        excelFileIndex: state.resumeAnchorIndex || null,
+        browserRowNumber: checking.rowNumber || null,
+        listCompanyName: checking.listCompanyName || "",
+        profileCompanyName,
+        profileCompanyCandidates,
+        profileCompanyKey,
+        profileReady,
+        profileUrl
+      };
+      writeCollectionState(state);
+      return resultFromCollectionState(state);
+    }
+
+    const nextRowNumber = Number.isFinite(Number(checking.rowNumber))
+      ? Number(checking.rowNumber) + 1
+      : Math.max(Number.parseInt(state.resumeStartRowNumber, 10) || 1, (Number.parseInt(state.resumeAnchorNextRowNumber, 10) || 1));
+
+    state.resumeAnchorFound = true;
+    state.resumeAnchorRowNumber = checking.rowNumber || null;
+    state.resumeStartRowNumber = nextRowNumber;
+    state.resumeAnchorNextRowNumber = nextRowNumber;
+    state.phase = "results";
+    state.summary.diagnostics.resumeAnchor = {
+      found: true,
+      buyerName: state.resumeAnchorBuyerName,
+      excelFileIndex: state.resumeAnchorIndex || null,
+      browserRowNumber: checking.rowNumber || null,
+      nextRowNumber,
+      listCompanyName: checking.listCompanyName || "",
+      profileCompanyName,
+      profileUrl
+    };
+    await postLocalGuiLog(
+      `이어하기 위치 확정: 브라우저 ${checking.rowNumber || "-"}번 일치, ${nextRowNumber}번부터 수집 시작`,
+      "이어하기"
+    );
+    writeCollectionState(state);
+
+    const returned = await goBackToResults(state.resultsUrl);
+    if (returned) {
+      await waitForImporterResultsReady(25000);
+      return continueQualifiedCollection(readCollectionState() || state);
+    }
+
+    return resultFromCollectionState(state, { resuming: true, reason: "Returning from resume anchor profile." });
+  }
+
+  async function resolveResumeAnchor(state, candidates) {
+    if (state.resumeAnchorFound || !state.resumeAnchorBuyerKey) {
+      return {
+        ok: true,
+        candidates
+      };
+    }
+
+    const initialMinimumRowNumber = Math.max(1, Number.parseInt(state.resumeAnchorIndex, 10) || 1);
+    let minimumRowNumber = Math.max(
+      initialMinimumRowNumber,
+      Number.parseInt(state.resumeAnchorNextRowNumber, 10) || initialMinimumRowNumber
+    );
+    let currentCandidates = candidates;
+    let rowRange = candidateRowRange(currentCandidates);
+    const checked = new Set(state.resumeAnchorChecked || []);
+    await postLocalGuiLog(
+      `이어하기 기준 확인: 엑셀 마지막 번호 ${initialMinimumRowNumber}, 엑셀 파일명 "${state.resumeAnchorBuyerName}", key ${state.resumeAnchorBuyerKey}`,
+      "이어하기"
+    );
+
+    for (let guard = 0; guard < 120; guard += 1) {
+      const stopped = await abortIfGuiStopRequested();
+      if (stopped) {
+        state.active = false;
+        state.summary.ok = false;
+        state.summary.reason = stopped.reason;
+        writeCollectionState(state);
+        return resultFromCollectionState(state, { stopped: true, reason: stopped.reason });
+      }
+
+      minimumRowNumber = Math.max(
+        initialMinimumRowNumber,
+        Number.parseInt(state.resumeAnchorNextRowNumber, 10) || minimumRowNumber
+      );
+      rowRange = candidateRowRange(currentCandidates);
+      const targetPage = importerPageForRow(minimumRowNumber, inferImporterPageSize(rowRange));
+      if (currentPaginationPage() !== targetPage) {
+        await postLocalGuiLog(
+          `이어하기 페이지 이동: 엑셀 마지막 번호 ${initialMinimumRowNumber}, 브라우저 ${minimumRowNumber}번 기준 ${targetPage}페이지`,
+          "페이지 이동"
+        );
+        const jumped = await goToImporterPage(targetPage, minimumRowNumber);
+        state.summary.diagnostics.lastPageJump = jumped;
+        if (jumped.stopped) {
+          state.active = false;
+          state.summary.ok = false;
+          state.summary.reason = jumped.reason;
+          writeCollectionState(state);
+          return resultFromCollectionState(state, { stopped: true, reason: jumped.reason });
+        }
+
+        if (jumped.ok) {
+          currentCandidates = await waitForImporterResultsReady(25000);
+          rowRange = candidateRowRange(currentCandidates);
+        } else {
+          state.summary.reason = jumped.reason || `Could not reach importer page ${targetPage}.`;
+          state.active = false;
+          writeCollectionState(state);
+          return resultFromCollectionState(state);
+        }
+      }
+
+      const identities = sortedImporterCandidateIdentities(currentCandidates, minimumRowNumber);
+      const listMatchedIdentity = identities.find((item) => item.companyKey === state.resumeAnchorBuyerKey);
+      await postLocalGuiLog(
+        listMatchedIdentity
+          ? `이어하기 목록 1차 일치: ${currentPaginationPage() || "-"}페이지 ${listMatchedIdentity.rowNumber || "-"}번 ${listMatchedIdentity.listCompanyName}`
+          : `이어하기 목록 1차 일치 없음: ${currentPaginationPage() || "-"}페이지 후보 ${summarizeImporterIdentities(identities)}`,
+        "이어하기"
+      );
+
+      const identity = pickResumeAnchorIdentity(identities, state.resumeAnchorBuyerKey, checked);
+
+      if (identity) {
+        await postLocalGuiLog(
+          `이어하기 후보 선택: ${identity.rowNumber || "-"}번 ${identity.listCompanyName} (${identity.listNameMatchedAnchor ? "목록명 일치" : "순차 확인"})`,
+          "이어하기"
+        );
+
+        const rowPart = Number.isFinite(identity.rowNumber) ? identity.rowNumber : "rowless";
+        const checkKey = `${rowPart}:${identity.companyKey}`;
+        checked.add(checkKey);
+        state.resumeAnchorChecked = Array.from(checked).slice(-300);
+        if (Number.isFinite(identity.rowNumber)) {
+          state.resumeAnchorNextRowNumber = identity.rowNumber + 1;
+          minimumRowNumber = state.resumeAnchorNextRowNumber;
+        }
+
+        const inspected = await inspectResumeAnchorProfile(identity, state);
+        if (inspected.stopped) {
+          state.active = false;
+          state.summary.ok = false;
+          state.summary.reason = inspected.reason;
+          writeCollectionState(state);
+          return resultFromCollectionState(state, { stopped: true, reason: inspected.reason });
+        }
+
+        await postLocalGuiLog(
+          `이어하기 상세 2차 확인: 목록명 ${identity.listCompanyName}, 상세페이지명 ${inspected.profileCompanyName || "(empty)"}, 결과 ${inspected.matched ? "일치" : "불일치"}`,
+          "이어하기"
+        );
+
+        currentCandidates = inspected.candidates?.length ? inspected.candidates : await waitForImporterResultsReady(25000);
+        rowRange = candidateRowRange(currentCandidates);
+
+        state.summary.diagnostics.resumeAnchorLastCheck = {
+          excelFileIndex: initialMinimumRowNumber,
+          browserRowNumber: identity.rowNumber || null,
+          nextBrowserRowNumber: state.resumeAnchorNextRowNumber || null,
+          listCompanyName: identity.listCompanyName,
+          listNameMatchedAnchor: Boolean(identity.listNameMatchedAnchor),
+          profileCompanyName: inspected.profileCompanyName || "",
+          profileCompanyCandidates: inspected.profileCompanyCandidates || [],
+          matched: Boolean(inspected.matched),
+          profileUrl: inspected.profileUrl || "",
+          ready: inspected.ready || null
+        };
+
+        if (!inspected.matched) {
+          if (identity.listNameMatchedAnchor) {
+            const profileName = inspected.profileCompanyName || "(empty)";
+            state.active = false;
+            state.summary.ok = false;
+            state.summary.reason = `List-name anchor candidate did not match profile name: ${identity.listCompanyName} -> ${profileName}`;
+            state.summary.diagnostics.resumeAnchor = {
+              found: false,
+              stoppedAtListNameMatch: true,
+              buyerName: state.resumeAnchorBuyerName,
+              excelFileIndex: initialMinimumRowNumber,
+              browserRowNumber: identity.rowNumber || null,
+              listCompanyName: identity.listCompanyName,
+              profileCompanyName: inspected.profileCompanyName || "",
+              profileCompanyCandidates: inspected.profileCompanyCandidates || [],
+              profileCompanyKey: inspected.profileCompanyKey || "",
+              profileReady: inspected.ready || null,
+              profileUrl: inspected.profileUrl || ""
+            };
+            await postLocalGuiLog(
+              `이어하기 후보 불일치: 목록명 ${identity.listCompanyName}, 상세페이지명 ${profileName}`,
+              "이어하기 중단"
+            );
+            writeCollectionState(state);
+            return resultFromCollectionState(state);
+          }
+
+          writeCollectionState(state);
+          continue;
+        }
+
+        const nextRowNumber = Number.isFinite(identity.rowNumber)
+          ? identity.rowNumber + 1
+          : Math.max(state.resumeStartRowNumber || 1, minimumRowNumber + 1);
+
+        state.resumeAnchorFound = true;
+        state.resumeAnchorRowNumber = identity.rowNumber || null;
+        state.resumeStartRowNumber = nextRowNumber;
+        state.summary.diagnostics.resumeAnchor = {
+          found: true,
+          buyerName: state.resumeAnchorBuyerName,
+          excelFileIndex: initialMinimumRowNumber,
+          anchorIndex: initialMinimumRowNumber,
+          browserRowNumber: identity.rowNumber || null,
+          nextRowNumber,
+          listCompanyName: identity.listCompanyName,
+          profileCompanyName: inspected.profileCompanyName,
+          profileUrl: inspected.profileUrl
+        };
+        await postLocalGuiLog(
+          `이어하기 위치 확정: 브라우저 ${identity.rowNumber || "-"}번 일치, ${nextRowNumber}번부터 수집 시작`,
+          "이어하기"
+        );
+        writeCollectionState(state);
+
+        return {
+          ok: true,
+          candidates: currentCandidates,
+          anchor: identity
+        };
+      }
+
+      const moved = await goNextImporterPage();
+      state.summary.diagnostics.lastPagination = moved;
+
+      if (!moved.ok) {
+        break;
+      }
+
+      state.summary.pages += 1;
+      currentCandidates = await waitForImporterResultsReady(25000);
+      rowRange = candidateRowRange(currentCandidates);
+    }
+
+    state.resumeAnchorFound = false;
+    state.active = false;
+    state.summary.ok = false;
+    state.summary.reason = "Resume anchor buyer was not found. Collection did not start to avoid duplicate or out-of-position buyers.";
+    state.summary.diagnostics.resumeAnchor = {
+      found: false,
+      buyerName: state.resumeAnchorBuyerName,
+      excelFileIndex: initialMinimumRowNumber,
+      anchorIndex: initialMinimumRowNumber,
+      lastBrowserRowNumber: Number.parseInt(state.resumeAnchorNextRowNumber, 10) - 1 || null,
+      rowRange: candidateRowRange(getImporterCandidates()),
+      candidates: importerCandidateSummary(getImporterCandidates()).slice(0, 20)
+    };
+    writeCollectionState(state);
+
+    return {
+      ok: false,
+      candidates: currentCandidates,
+      active: false,
+      reason: state.summary.reason
+    };
+  }
+
+  function candidateRowRange(candidates) {
+    const rowNumbers = candidates
+      .map((candidate) => importerRowNumberFromElement(candidate))
+      .filter((rowNumber) => Number.isFinite(rowNumber));
+
+    if (!rowNumbers.length) {
+      return { min: null, max: null };
+    }
+
+    return {
+      min: Math.min(...rowNumbers),
+      max: Math.max(...rowNumbers)
+    };
   }
 
   function pageLooksBusy() {
@@ -1578,6 +2669,32 @@
     };
   }
 
+  async function openImportCommodityTab(hsCode) {
+    const commodities = findExactControl("Commodities", "a, button, [role='button']");
+    if (!commodities) {
+      return {
+        ok: false,
+        reason: "Commodities tab not found"
+      };
+    }
+
+    clickElement(commodities);
+    await waitUntil(() => {
+      return findExactControl("Import Commodities", "button, a, [role='button']") ||
+        textOf(document.body).includes(hsCode);
+    }, 15000, 500, 1000);
+
+    const importCommodities = findExactControl("Import Commodities", "button, a, [role='button']");
+    if (importCommodities) {
+      clickElement(importCommodities);
+      await sleep(900);
+    }
+
+    return {
+      ok: true
+    };
+  }
+
   async function assessCommodityValue(hsCode) {
     const code = String(hsCode || "").trim();
 
@@ -1588,43 +2705,54 @@
       };
     }
 
-    const commodities = findExactControl("Commodities", "a, button, [role='button']");
-    if (!commodities) {
-      return {
-        ok: false,
-        reason: "Commodities tab not found"
-      };
-    }
+    const attempts = [];
 
-    clickElement(commodities);
-    await waitUntil(() => findExactControl("Import Commodities", "button, a, [role='button']") || textOf(document.body).includes(code), 12000, 400, 700);
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      const opened = await openImportCommodityTab(code);
+      if (!opened.ok) {
+        return opened;
+      }
 
-    const importCommodities = findExactControl("Import Commodities", "button, a, [role='button']");
-    if (importCommodities) {
-      clickElement(importCommodities);
-      await waitUntil(() => textOf(document.body).includes(code), 12000, 400, 700);
-    }
+      const parsed = await waitUntil(() => {
+        const bodyText = textOf(document.body);
+        return parsePercentForHsCode(bodyText, code);
+      }, attempt === 1 ? 15000 : 22000, 600, 1000);
 
-    const bodyText = textOf(document.body);
-    const parsed = parsePercentForHsCode(bodyText, code);
+      const bodyText = textOf(document.body);
+      attempts.push({
+        attempt,
+        parsed: Boolean(parsed),
+        hasHsCodeText: bodyText.includes(code),
+        bodyTextSample: bodyText.slice(0, 500)
+      });
 
-    if (!parsed) {
-      return {
-        ok: false,
-        hsCode: code,
-        qualified: false,
-        reason: "HS code row not found in commodities text",
-        bodyTextSample: bodyText.slice(0, 1600)
-      };
+      if (parsed) {
+        return {
+          ok: true,
+          hsCode: code,
+          importValueUsdText: parsed.importValueUsdText,
+          importValuePercent: parsed.importValuePercent,
+          threshold: 5,
+          qualified: parsed.importValuePercent > 5,
+          attempts
+        };
+      }
+
+      await sleep(1200 * attempt);
+      const overview = findExactControl("Overview", "a, button, [role='button']");
+      if (overview) {
+        clickElement(overview);
+        await sleep(800);
+      }
     }
 
     return {
-      ok: true,
+      ok: false,
       hsCode: code,
-      importValueUsdText: parsed.importValueUsdText,
-      importValuePercent: parsed.importValuePercent,
-      threshold: 5,
-      qualified: parsed.importValuePercent > 5
+      qualified: null,
+      reason: "HS code row could not be parsed from Import Commodities after retries",
+      attempts,
+      bodyTextSample: textOf(document.body).slice(0, 1600)
     };
   }
 
@@ -1663,10 +2791,43 @@
       .map(textOf)[0] || "";
   }
 
+  function visibleTexts(selectors) {
+    const seen = new Set();
+
+    return Array.from(document.querySelectorAll(selectors))
+      .filter((element) => {
+        if (isHelperElement(element)) {
+          return false;
+        }
+
+        const rect = element.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0 && textOf(element);
+      })
+      .sort((a, b) => {
+        const aRect = a.getBoundingClientRect();
+        const bRect = b.getBoundingClientRect();
+        return aRect.top - bRect.top || aRect.left - bRect.left;
+      })
+      .map(textOf)
+      .filter((text) => {
+        const key = companyKeyFromName(text);
+        if (!key || seen.has(key)) {
+          return false;
+        }
+
+        seen.add(key);
+        return true;
+      });
+  }
+
   function extractOverviewProfile() {
     const bodyText = textOf(document.body);
     const beforeMenu = bodyText.split(/\sOverview\sTurnover\sCountries\s/i)[0] || "";
-    let companyName = firstVisibleText("h1, h2") || "";
+    const logoCompanyCandidates = visibleTexts(
+      ".logo-company p.images-all, .logo-company .images-all, p.images-all, .logo-company p.images_all, .logo-company .images_all, p.images_all"
+    );
+    const headingCandidates = visibleTexts("h1, h2");
+    let companyName = logoCompanyCandidates[0] || headingCandidates[0] || "";
     const headerWithoutUser = beforeMenu.replace(/^Kotrasub4\s+/i, "").trim();
 
     const homepageMatch = headerWithoutUser.match(/https?:\/\/\S+|www\.\S+/i);
@@ -1713,6 +2874,14 @@
       companyName = nameCountrySource.trim();
     }
 
+    const profileCompanyCandidates = Array.from(new Set([
+      ...logoCompanyCandidates,
+      ...headingCandidates,
+      countryOfOrigin ? nameCountrySource.slice(0, nameCountrySource.length - countryOfOrigin.length).trim() : "",
+      nameCountrySource.trim(),
+      companyName
+    ].map((text) => text.replace(/\s+/g, " ").trim()).filter(Boolean)));
+
     const address = addressSource;
 
     const annualImportTurnover = parseMoneyToNumber(turnoverMatch?.[1]);
@@ -1743,7 +2912,9 @@
       raw: {
         turnoverText: turnoverMatch?.[0] || "",
         shipmentText: shipmentMatch?.[0] || "",
-        headerText: beforeMenu
+        headerText: beforeMenu,
+        logoCompanyCandidates,
+        profileCompanyCandidates
       }
     };
   }
@@ -2044,16 +3215,28 @@
       return stoppedAfterCommodity;
     }
 
-    if (!commodityValue.ok || !commodityValue.qualified) {
+    if (commodityValue.ok && commodityValue.qualified === false) {
       return {
         ok: false,
         skipped: true,
         downloaded: false,
-        reason: commodityValue.ok
-          ? `HS code import value percent is not greater than ${commodityValue.threshold}`
-          : commodityValue.reason,
+        reason: `HS code import value percent is not greater than ${commodityValue.threshold}`,
         hsCode: code,
         commodityValue
+      };
+    }
+
+    if (!commodityValue.ok || commodityValue.qualified !== true) {
+      return {
+        ok: false,
+        skipped: false,
+        downloaded: false,
+        reason: commodityValue.reason || "HS code import value percent could not be verified",
+        hsCode: code,
+        commodityValue,
+        diagnostics: {
+          commodityValue
+        }
       };
     }
 
@@ -2170,8 +3353,20 @@
     sessionStorage.removeItem(COLLECTION_STATE_KEY);
   }
 
-  function createCollectionState(hsCode, targetCount) {
+  function createCollectionState(hsCode, targetCount, options = {}) {
     const resultsUrl = location.href;
+    const alreadySavedBuyers = options.alreadySavedBuyers || [];
+    const resumeStartRowNumber = Math.max(1, Number.parseInt(options.resumeStartRowNumber, 10) || 1);
+    const resumeAnchorBuyer = options.resumeAnchorBuyer || {};
+    const resumeAnchorBuyerName = String(resumeAnchorBuyer.buyerName || "").trim();
+    const resumeAnchorBuyerKey = companyKeyFromName(resumeAnchorBuyerName);
+    const resumeAnchorIndex = Number.parseInt(resumeAnchorBuyer.index, 10) || 0;
+    const savedBuyerKeys = Array.from(new Set(
+      (Array.isArray(alreadySavedBuyers) ? alreadySavedBuyers : [])
+        .map((buyer) => companyKeyFromName(buyer))
+        .filter(Boolean)
+    ));
+    const initialVisitedCompanyKeys = USE_SAVED_BUYER_SKIP_RESUME ? savedBuyerKeys : [];
 
     return {
       active: true,
@@ -2179,7 +3374,14 @@
       hsCode: String(hsCode || "").trim(),
       targetCount,
       resultsUrl,
-      visitedCompanyKeys: [],
+      resumeStartRowNumber,
+      resumeAnchorBuyerName,
+      resumeAnchorBuyerKey,
+      resumeAnchorIndex,
+      resumeAnchorNextRowNumber: resumeAnchorIndex || resumeStartRowNumber,
+      resumeAnchorFound: !resumeAnchorBuyerKey,
+      useSavedBuyerSkipResume: USE_SAVED_BUYER_SKIP_RESUME,
+      visitedCompanyKeys: initialVisitedCompanyKeys,
       summary: {
         ok: false,
         mode: "list",
@@ -2193,7 +3395,13 @@
         diagnostics: {
           resultsUrl,
           startedAt: new Date().toISOString(),
-          resumeMode: true
+          resumeMode: true,
+          resumeStartRowNumber,
+          resumeAnchorBuyerName,
+          resumeAnchorIndex,
+          resumeAnchorNextRowNumber: resumeAnchorIndex || resumeStartRowNumber,
+          useSavedBuyerSkipResume: USE_SAVED_BUYER_SKIP_RESUME,
+          alreadySavedBuyers: savedBuyerKeys.length
         }
       }
     };
@@ -2225,6 +3433,7 @@
 
       const bodyText = textOf(document.body);
       const overview = extractOverviewProfile();
+      const logoCompanyReady = Boolean(overview.raw?.logoCompanyCandidates?.[0]);
       const lengthDelta = Math.abs(bodyText.length - lastLength);
       stableCount = lengthDelta < 80 ? stableCount + 1 : 0;
       lastLength = bodyText.length;
@@ -2232,6 +3441,7 @@
       if (
         bodyText.length > 800 &&
         stableCount >= 2 &&
+        logoCompanyReady &&
         overview.required.companyName &&
         overview.required.annualImportTurnover &&
         overview.required.annualImportShipment
@@ -2269,6 +3479,10 @@
       state.summary.diagnostics.finishedAt = new Date().toISOString();
       clearCollectionState();
       return resultFromCollectionState(state, { reason: "Target count reached." });
+    }
+
+    if (location.href.includes("/company-profile") && state.phase === "resumeAnchor") {
+      return verifyResumeAnchorOnProfilePage(state);
     }
 
     if (location.href.includes("/company-profile")) {
@@ -2353,6 +3567,12 @@
         }
       }
 
+      const processedRowNumber = Number.parseInt(state.currentCompany?.rowNumber, 10);
+      if (Number.isFinite(processedRowNumber)) {
+        state.resumeStartRowNumber = processedRowNumber + 1;
+        state.summary.diagnostics.nextBrowserRowNumber = state.resumeStartRowNumber;
+      }
+
       state.currentCompany = null;
       state.phase = "results";
       writeCollectionState(state);
@@ -2374,8 +3594,7 @@
         return resultFromCollectionState(state, { reason: "Target count reached." });
       }
 
-      location.href = state.resultsUrl;
-      const returned = await waitForUrlPart("/search-results", 30000);
+      const returned = await goBackToResults(state.resultsUrl);
       if (returned) {
         await waitForImporterResultsReady(25000);
         return continueQualifiedCollection(readCollectionState() || state);
@@ -2416,13 +3635,55 @@
       }
     }
 
-    const visitedCompanyKeys = new Set(state.visitedCompanyKeys || []);
-    let target = findNextUnvisitedImporter(candidates, visitedCompanyKeys);
+    const anchorResolution = await resolveResumeAnchor(state, candidates);
+    if (anchorResolution?.stopped || anchorResolution?.active === false || anchorResolution?.ok === false) {
+      state.active = false;
+      state.summary.ok = false;
+      state.summary.reason = anchorResolution.reason || state.summary.reason || "Resume anchor resolution failed.";
+      writeCollectionState(state);
+      return resultFromCollectionState(state, {
+        stopped: Boolean(anchorResolution?.stopped),
+        reason: state.summary.reason
+      });
+    }
 
-    if (!target) {
+    candidates = anchorResolution.candidates || candidates;
+
+    const visitedCompanyKeys = new Set(state.visitedCompanyKeys || []);
+    const resumeStartRowNumber = Math.max(1, Number.parseInt(state.resumeStartRowNumber, 10) || 1);
+    let rowRange = candidateRowRange(candidates);
+    const targetResumePage = importerPageForRow(resumeStartRowNumber, inferImporterPageSize(rowRange));
+    if (currentPaginationPage() !== targetResumePage) {
+      await postLocalGuiLog(`브라우저 ${resumeStartRowNumber}번 기준 ${targetResumePage}페이지로 이동합니다.`, "페이지 이동");
+      const jumped = await goToImporterPage(targetResumePage, resumeStartRowNumber);
+      state.summary.diagnostics.lastPageJump = jumped;
+      if (jumped.stopped) {
+        state.active = false;
+        state.summary.ok = false;
+        state.summary.reason = jumped.reason;
+        writeCollectionState(state);
+        return resultFromCollectionState(state, { stopped: true, reason: jumped.reason });
+      }
+
+      if (jumped.ok) {
+        candidates = await waitForImporterResultsReady(25000);
+        rowRange = candidateRowRange(candidates);
+      } else {
+        state.summary.reason = jumped.reason || `Could not reach importer page ${targetResumePage}.`;
+        state.active = false;
+        writeCollectionState(state);
+        return resultFromCollectionState(state);
+      }
+    }
+
+    let target = findNextImporterByRowNumber(candidates, resumeStartRowNumber, visitedCompanyKeys);
+
+    while (!target && Number.isFinite(rowRange.max) && rowRange.max < resumeStartRowNumber) {
       const moved = await goNextImporterPage();
-      if (!moved) {
-        state.summary.reason = "Next page not found.";
+      state.summary.diagnostics.lastPagination = moved;
+
+      if (!moved.ok) {
+        state.summary.reason = moved.reason || `Could not reach resume row ${resumeStartRowNumber}.`;
         state.active = false;
         writeCollectionState(state);
         return resultFromCollectionState(state);
@@ -2430,21 +3691,47 @@
 
       state.summary.pages += 1;
       candidates = await waitForImporterResultsReady(25000);
-      target = findNextUnvisitedImporter(candidates, visitedCompanyKeys);
+      rowRange = candidateRowRange(candidates);
+      target = findNextImporterByRowNumber(candidates, resumeStartRowNumber, visitedCompanyKeys);
+    }
+
+    if (!target) {
+      const moved = await goNextImporterPage();
+      state.summary.diagnostics.lastPagination = moved;
+
+      if (!moved.ok) {
+        state.summary.reason = moved.reason || "Next page not found.";
+        state.active = false;
+        writeCollectionState(state);
+        return resultFromCollectionState(state);
+      }
+
+      state.summary.pages += 1;
+      candidates = await waitForImporterResultsReady(25000);
+      target = findNextImporterByRowNumber(candidates, resumeStartRowNumber, visitedCompanyKeys);
 
       if (!target) {
         await selectImportersTab();
         await waitForImporterResultsReady(25000);
         candidates = getImporterCandidates();
-        target = findNextUnvisitedImporter(candidates, visitedCompanyKeys);
+        target = findNextImporterByRowNumber(candidates, resumeStartRowNumber, visitedCompanyKeys);
       }
 
       if (!target) {
-        state.summary.reason = "No unvisited importer candidates found after moving to next page.";
+        state.summary.reason = "No target importer candidates found after moving to next page.";
+        state.summary.diagnostics.afterNextPage = {
+          signature: importerListSignature(),
+          candidateCount: getImporterCandidates().length,
+          visitedCount: visitedCompanyKeys.size,
+          resumeStartRowNumber,
+          rowRange: candidateRowRange(getImporterCandidates()),
+          candidates: importerCandidateSummary(getImporterCandidates()).slice(0, 20),
+          pageTextSample: textOf(document.body).slice(0, 800)
+        };
         state.active = false;
         await postLocalGuiLog(
-          `다음 페이지에서 새 바이어를 찾지 못해 중단했습니다. 현재 엑셀 ${state.summary.qualifiedSaved}/${state.targetCount}개 저장`,
-          "중단"
+          `No target buyer found after moving to the next page. Saved ${state.summary.qualifiedSaved}/${state.targetCount}.`,
+          "Stopped"
         );
         writeCollectionState(state);
         return resultFromCollectionState(state);
@@ -2453,13 +3740,15 @@
 
     const companyName = target.getAttribute("title") || textOf(target);
     const companyKey = companyKeyFromElement(target);
+    const rowNumber = importerRowNumberFromElement(target);
     visitedCompanyKeys.add(companyKey);
-    await postLocalGuiLog(`바이어 확인 중: ${companyName}`);
+    await postLocalGuiLog(`바이어 확인 중: ${rowNumber || "-"}번 ${companyName}`);
 
     state.visitedCompanyKeys = Array.from(visitedCompanyKeys);
     state.currentCompany = {
       companyName,
-      companyKey
+      companyKey,
+      rowNumber
     };
     state.phase = "profile";
     writeCollectionState(state);
@@ -2480,7 +3769,7 @@
     });
   }
 
-  async function collectQualifiedCompanies(hsCode, targetCount = 60) {
+  async function collectQualifiedCompanies(hsCode, targetCount = 60, options = {}) {
     if (!location.href.includes("/search-results")) {
       return {
         ok: false,
@@ -2496,7 +3785,7 @@
       };
     }
 
-    const state = createCollectionState(hsCode, targetCount);
+    const state = createCollectionState(hsCode, targetCount, options);
     writeCollectionState(state);
     return continueQualifiedCollection(state);
   }
@@ -2532,7 +3821,6 @@
 
     try {
       const result = await continueQualifiedCollection(state);
-      showResult(result);
     } catch (error) {
       const failedState = readCollectionState() || state;
       failedState.active = false;
@@ -2655,30 +3943,7 @@
   }
 
   function showResult(data) {
-    let output = document.getElementById("export-genius-helper-output");
-    if (!output) {
-      output = document.createElement("pre");
-      output.id = "export-genius-helper-output";
-      output.style.position = "fixed";
-      output.style.right = "12px";
-      output.style.bottom = "64px";
-      output.style.zIndex = "2147483647";
-      output.style.width = "420px";
-      output.style.maxHeight = "480px";
-      output.style.overflow = "auto";
-      output.style.margin = "0";
-      output.style.padding = "10px";
-      output.style.border = "1px solid #94a3b8";
-      output.style.borderRadius = "6px";
-      output.style.background = "#ffffff";
-      output.style.color = "#111827";
-      output.style.font = "12px/1.35 Arial, sans-serif";
-      output.style.whiteSpace = "pre-wrap";
-      output.style.boxShadow = "0 12px 30px rgba(15, 23, 42, 0.22)";
-      document.documentElement.appendChild(output);
-    }
-
-    output.textContent = JSON.stringify(data, null, 2);
+    console.debug("[Export Genius Helper]", data);
   }
 
   async function fetchLocalGui(path) {
@@ -2699,6 +3964,31 @@
         ok: false,
         reason: error?.message || String(error),
         url: `${LOCAL_GUI_URL}${path}`
+      };
+    }
+  }
+
+  async function postLocalGuiRawLog(payload) {
+    try {
+      const response = await fetch(`${LOCAL_GUI_URL}/raw-log`, {
+        method: "POST",
+        cache: "no-store",
+        headers: {
+          "Content-Type": "text/plain;charset=UTF-8"
+        },
+        body: JSON.stringify(payload)
+      });
+      const data = await response.json();
+
+      return {
+        ok: response.ok && Boolean(data.ok),
+        status: response.status,
+        data
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        reason: error?.message || String(error)
       };
     }
   }
@@ -2753,6 +4043,10 @@
   }
 
   async function getLocalGuiStopRequested() {
+    if (localExtensionStopRequested) {
+      return true;
+    }
+
     const result = await fetchLocalGui("/stop-request");
     return Boolean(result.ok && result.data?.stopRequested);
   }
@@ -2778,20 +4072,6 @@
 
     if (!result.ok || !task) {
       return result;
-    }
-
-    const hsInput = document.getElementById("export-genius-helper-hs");
-    const minInput = document.getElementById("export-genius-helper-min");
-    const maxInput = document.getElementById("export-genius-helper-max");
-
-    if (hsInput) {
-      hsInput.value = task.hsCode || "";
-    }
-    if (minInput) {
-      minInput.value = task.minValue || "";
-    }
-    if (maxInput) {
-      maxInput.value = task.maxValue || "";
     }
 
     return {
@@ -2864,7 +4144,11 @@
       }
     }
 
-    const collection = await collectQualifiedCompanies(task.hsCode, remainingCount);
+    const collection = await collectQualifiedCompanies(task.hsCode, remainingCount, {
+      alreadySavedBuyers: task.alreadySavedBuyers || [],
+      resumeStartRowNumber: alreadySaved + 1,
+      resumeAnchorBuyer: task.lastSavedBuyer || {}
+    });
 
     return {
       ok: Boolean(collection.ok),
@@ -2898,14 +4182,14 @@
 
   async function logCollectionForGui(task, collection, run = null) {
     if (!collection) {
-      const reason = run?.criteria?.totalValue?.reason || run?.criteria?.reason || run?.reason || "작업을 시작하지 못했습니다.";
-      await postLocalGuiLog(`${task.company} / HS ${task.hsCode}: ${friendlyReason(reason)}`, "오류 발생");
+      const reason = run?.criteria?.totalValue?.reason || run?.criteria?.reason || run?.reason || "Task could not start.";
+      await postLocalGuiLog(`${task.company} / HS ${task.hsCode}: ${friendlyReason(reason)}`, "Error");
       return;
     }
 
     await postLocalGuiLog(
-      `${task.company} / HS ${task.hsCode} 작업 결과: 엑셀 ${collection.qualifiedSaved || 0}개 저장`,
-      "작업 확인 중"
+      `${task.company} / HS ${task.hsCode} result: saved ${collection.qualifiedSaved || 0}`,
+      "Task checked"
     );
   }
 
@@ -2913,7 +4197,7 @@
     const results = [];
     let guard = 0;
 
-    await postLocalGuiLog("자동 작업을 시작합니다.", "모니터링 중");
+    await postLocalGuiLog("Automation started.", "Monitoring");
 
     while (guard < 200) {
       guard += 1;
@@ -2950,8 +4234,8 @@
 
       const task = current.data?.task;
       await postLocalGuiLog(
-        `${current.data?.queuePosition}/${current.data?.queueTotal} 작업 진행 중: ${task.company} / HS ${task.hsCode} - 현재 ${task.alreadySaved || 0}/${task.targetCount}, 추가 ${task.remainingCount || task.targetCount}개`,
-        "작업 진행 중"
+        `${current.data?.queuePosition}/${current.data?.queueTotal} running: ${task.company} / HS ${task.hsCode} - current ${task.alreadySaved || 0}/${task.targetCount}, remaining ${task.remainingCount || task.targetCount}`,
+        "Running task"
       );
       const run = await startLocalGuiTaskAutomation();
       results.push({
@@ -3022,6 +4306,7 @@
   }
 
   let localGuiCommandRunning = false;
+  let localExtensionStopRequested = false;
 
   async function handleLocalGuiCommand(command) {
     if (!command?.action) {
@@ -3029,6 +4314,7 @@
     }
 
     if (command.action === "stop") {
+      localExtensionStopRequested = true;
       clearCollectionState();
       await postLocalGuiLog("작업을 중단했습니다.", "중단");
       await postLocalGuiCommandResult(command, true, "작업 중단 요청을 처리했습니다.");
@@ -3045,20 +4331,32 @@
       return;
     }
 
+    localExtensionStopRequested = false;
     localGuiCommandRunning = true;
     try {
       const result = await startLocalGuiQueueAutomation();
-      showResult(result);
+      await postLocalGuiRawLog({
+        type: "command-result",
+        command,
+        result
+      });
       await postLocalGuiCommandResult(
         command,
         Boolean(result.ok),
-        result.ok ? "자동 작업이 완료되었습니다." : `자동 작업이 중단되었습니다: ${result.reason || "오류"}`
+        result.ok ? "Automation completed." : `Automation stopped: ${result.reason || "error"}`
       );
     } catch (error) {
       const message = error?.message || String(error);
-      await postLocalGuiLog(`오류 발생: ${message}`, "오류 발생");
+      await postLocalGuiLog(`Error: ${message}`, "Error");
+      await postLocalGuiRawLog({
+        type: "command-error",
+        command,
+        error: {
+          message,
+          stack: error?.stack || ""
+        }
+      });
       await postLocalGuiCommandResult(command, false, message);
-      showResult({ ok: false, reason: message });
     } finally {
       localGuiCommandRunning = false;
     }
@@ -3066,6 +4364,11 @@
 
   async function pollLocalGuiCommands() {
     if (localGuiCommandRunning) {
+      const runningResult = await getLocalGuiCommand();
+      const runningCommand = runningResult.data?.command;
+      if (runningResult.ok && runningCommand?.action === "stop") {
+        await handleLocalGuiCommand(runningCommand);
+      }
       return;
     }
 
@@ -3074,119 +4377,6 @@
     if (result.ok && command) {
       await handleLocalGuiCommand(command);
     }
-  }
-
-  function createPanel() {
-    document.getElementById("export-genius-helper-panel")?.remove();
-
-    const panel = document.createElement("div");
-    panel.id = "export-genius-helper-panel";
-    panel.style.position = "fixed";
-    panel.style.right = "12px";
-    panel.style.bottom = "12px";
-    panel.style.zIndex = "2147483647";
-    panel.style.display = "flex";
-    panel.style.gap = "6px";
-    panel.style.padding = "6px";
-    panel.style.border = "1px solid #94a3b8";
-    panel.style.borderRadius = "6px";
-    panel.style.background = "#ffffff";
-    panel.style.boxShadow = "0 8px 24px rgba(15, 23, 42, 0.2)";
-    panel.style.alignItems = "center";
-    panel.style.flexWrap = "wrap";
-    panel.style.maxWidth = "520px";
-
-    const version = document.createElement("div");
-    version.textContent = HELPER_VERSION;
-    version.style.width = "100%";
-    version.style.font = "11px Arial, sans-serif";
-    version.style.color = "#475569";
-    panel.appendChild(version);
-
-    const fields = document.createElement("div");
-    fields.style.display = "flex";
-    fields.style.gap = "6px";
-    fields.style.alignItems = "center";
-
-    const hsInput = document.createElement("input");
-    hsInput.id = "export-genius-helper-hs";
-    hsInput.placeholder = "HS";
-    hsInput.value = "340130";
-    hsInput.style.width = "76px";
-    hsInput.style.height = "28px";
-    hsInput.style.border = "1px solid #94a3b8";
-    hsInput.style.borderRadius = "5px";
-    hsInput.style.padding = "0 6px";
-    hsInput.style.font = "12px Arial, sans-serif";
-
-    const minInput = document.createElement("input");
-    minInput.id = "export-genius-helper-min";
-    minInput.placeholder = "Min";
-    minInput.value = "50000";
-    minInput.style.width = "82px";
-    minInput.style.height = "28px";
-    minInput.style.border = "1px solid #94a3b8";
-    minInput.style.borderRadius = "5px";
-    minInput.style.padding = "0 6px";
-    minInput.style.font = "12px Arial, sans-serif";
-
-    const maxInput = document.createElement("input");
-    maxInput.id = "export-genius-helper-max";
-    maxInput.placeholder = "Max";
-    maxInput.value = "5000000";
-    maxInput.style.width = "92px";
-    maxInput.style.height = "28px";
-    maxInput.style.border = "1px solid #94a3b8";
-    maxInput.style.borderRadius = "5px";
-    maxInput.style.padding = "0 6px";
-    maxInput.style.font = "12px Arial, sans-serif";
-
-    fields.appendChild(hsInput);
-    fields.appendChild(minInput);
-    fields.appendChild(maxInput);
-    panel.appendChild(fields);
-
-    const buttons = [
-      ["확인", () => showResult(inspectPage())],
-      ["표시", () => showResult(highlightControls())],
-      ["입력", () => showResult(testFillFirstInput())],
-      ["Global", async () => showResult(await selectGlobalImport())],
-      ["GUI", async () => showResult(await checkLocalGui())],
-      ["작업", async () => showResult(await getLocalGuiTask())],
-      ["가져오기", async () => showResult(await loadLocalGuiTaskIntoPanel())],
-      ["작업적용", async () => showResult(await applyLocalGuiTaskCriteria())],
-      ["작업시작", async () => showResult(await startLocalGuiTaskAutomation())],
-      ["전체작업", async () => showResult(await startLocalGuiQueueAutomation())],
-      ["Stop", () => {
-        clearCollectionState();
-        showResult({ ok: true, stopped: true, reason: "Qualified-company collection state cleared." });
-      }],
-      ["조건", async () => showResult(await applyUserCriteria({
-        hsCode: hsInput.value,
-        minValue: minInput.value,
-        maxValue: maxInput.value
-      }))],
-      ["전체", async () => showResult(await runTotalAutomation(hsInput.value))],
-      ["닫기", () => document.getElementById("export-genius-helper-output")?.remove()]
-    ];
-
-    buttons.forEach(([label, action]) => {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.textContent = label;
-      button.style.height = "30px";
-      button.style.minWidth = "44px";
-      button.style.border = "1px solid #2563eb";
-      button.style.borderRadius = "5px";
-      button.style.background = "#2563eb";
-      button.style.color = "#ffffff";
-      button.style.font = "12px Arial, sans-serif";
-      button.style.cursor = "pointer";
-      button.addEventListener("click", action);
-      panel.appendChild(button);
-    });
-
-    document.documentElement.appendChild(panel);
   }
 
   window.exportGeniusHelper = {
@@ -3215,9 +4405,13 @@
     clearCollectionState
   };
 
-  createPanel();
+  setTimeout(async () => {
+    await postLocalGuiLog(`Extension ready: ${HELPER_VERSION}`, "Extension ready");
+    await pollLocalGuiCommands();
+  }, 500);
   setTimeout(autoResumeQualifiedCollection, 1200);
   setInterval(pollLocalGuiCommands, 1500);
 
   return inspectPage();
 })();
+

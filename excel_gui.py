@@ -170,6 +170,75 @@ def count_task_xlsx_files(output_root: Path, task: ExportTask) -> int:
     return len(seen)
 
 
+def buyer_name_from_xlsx_path(path: Path) -> str:
+    stem = strip_download_suffix(path.stem).strip()
+    prefix, separator, remainder = stem.partition(".")
+    if separator and prefix.strip().isdigit() and remainder.strip():
+        return remainder.strip()
+
+    return stem
+
+
+def xlsx_index_from_path(path: Path) -> int:
+    prefix = path.stem.split(".", 1)[0].strip()
+    return int(prefix) if prefix.isdigit() else 0
+
+
+def last_saved_buyer_for_task(output_root: Path, task: ExportTask) -> dict:
+    candidates: list[tuple[int, str, Path]] = []
+    seen_paths: set[Path] = set()
+
+    for folder in task_output_dirs(output_root, task):
+        if not folder.exists():
+            continue
+
+        for path in folder.glob("*.xlsx"):
+            resolved = path.resolve()
+            if resolved in seen_paths:
+                continue
+
+            seen_paths.add(resolved)
+            buyer_name = buyer_name_from_xlsx_path(path)
+            if buyer_name:
+                candidates.append((xlsx_index_from_path(path), buyer_name, path))
+
+    if not candidates:
+        return {}
+
+    index, buyer_name, path = max(candidates, key=lambda item: (item[0], item[2].stat().st_mtime))
+    return {
+        "index": str(index),
+        "buyerName": buyer_name,
+        "fileName": path.name,
+    }
+
+
+def saved_buyer_names_for_task(output_root: Path, task: ExportTask) -> list[str]:
+    buyers: list[str] = []
+    seen_paths: set[Path] = set()
+    seen_keys: set[str] = set()
+
+    for folder in task_output_dirs(output_root, task):
+        if not folder.exists():
+            continue
+
+        for path in sorted(folder.glob("*.xlsx")):
+            resolved = path.resolve()
+            if resolved in seen_paths:
+                continue
+
+            seen_paths.add(resolved)
+            buyer_name = buyer_name_from_xlsx_path(path)
+            buyer_key = normalize_name_key(buyer_name)
+            if not buyer_name or not buyer_key or buyer_key in seen_keys:
+                continue
+
+            seen_keys.add(buyer_key)
+            buyers.append(buyer_name)
+
+    return buyers
+
+
 def wait_until_json_ready(path: Path, attempts: int = 8, delay_seconds: float = 0.5) -> dict:
     previous_size = -1
 
@@ -334,6 +403,17 @@ class LocalApiHandler(BaseHTTPRequestHandler):
 
         self.send_json(404, {"ok": False, "reason": "Unknown endpoint."})
 
+    def do_POST(self) -> None:
+        parsed = urlparse(self.path)
+
+        if parsed.path == "/raw-log":
+            length = int(self.headers.get("Content-Length") or "0")
+            body = self.rfile.read(length).decode("utf-8", errors="replace") if length > 0 else ""
+            self.send_json(200, self.app.local_raw_log_payload(body))
+            return
+
+        self.send_json(404, {"ok": False, "reason": "Unknown endpoint."})
+
 
 class ExcelGui:
     def __init__(self, root: tk.Tk) -> None:
@@ -369,6 +449,8 @@ class ExcelGui:
         self.command_counter = 0
         self.command_lock = threading.Lock()
         self.stop_requested = False
+        self.raw_logs: list[dict] = []
+        self.raw_log_lock = threading.Lock()
 
         self.build()
         self.start_local_server()
@@ -450,6 +532,8 @@ class ExcelGui:
     def task_payload(self, task: ExportTask, task_number: int, target_count: int | str) -> dict:
         output_root = Path(self.output_dir_var.get())
         already_saved = count_task_xlsx_files(output_root, task)
+        already_saved_buyers = saved_buyer_names_for_task(output_root, task)
+        last_saved_buyer = last_saved_buyer_for_task(output_root, task)
         remaining_count = max(0, int(target_count) - already_saved)
 
         return {
@@ -461,6 +545,8 @@ class ExcelGui:
             "targetCount": str(target_count),
             "alreadySaved": str(already_saved),
             "remainingCount": str(remaining_count),
+            "alreadySavedBuyers": already_saved_buyers,
+            "lastSavedBuyer": last_saved_buyer,
         }
 
     def set_current_task_payload(self, payload: dict | None) -> None:
@@ -578,6 +664,7 @@ class ExcelGui:
             self.pending_command["claimed"] = True
             command = dict(self.pending_command)
 
+        self.post_watch_message(f"확장프로그램이 명령을 수신했습니다: {command.get('action')}")
         return {"ok": True, "command": command}
 
     def local_command_result_payload(self, query: dict[str, list[str]]) -> dict:
@@ -593,6 +680,24 @@ class ExcelGui:
             self.post_watch_message(message, "완료" if ok else "오류 발생")
 
         return {"ok": True}
+
+    def local_raw_log_payload(self, body: str) -> dict:
+        try:
+            payload = json.loads(body) if body else {}
+        except json.JSONDecodeError:
+            payload = {"raw": body}
+
+        entry = {
+            "receivedAt": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "payload": payload,
+        }
+
+        with self.raw_log_lock:
+            self.raw_logs.append(entry)
+            self.raw_logs = self.raw_logs[-30:]
+            count = len(self.raw_logs)
+
+        return {"ok": True, "count": count}
 
     def local_stop_request_payload(self) -> dict:
         return {"ok": True, "stopRequested": bool(self.stop_requested)}
@@ -724,14 +829,7 @@ class ExcelGui:
             }
 
     def update_current_task_payload(self, task: ExportTask, task_number: int) -> None:
-        payload = {
-            "taskNumber": task_number,
-            "company": task.company,
-            "hsCode": task.hscode,
-            "minValue": task.min_usd,
-            "maxValue": task.max_usd,
-            "targetCount": self.target_count_var.get(),
-        }
+        payload = self.task_payload(task, task_number, self.target_count_var.get())
 
         with self.payload_lock:
             self.current_task_payload = payload
@@ -814,6 +912,7 @@ class ExcelGui:
         actions.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         ttk.Button(actions, text="모니터링 시작", command=self.start_gui_automation).pack(side="left")
         ttk.Button(actions, text="모니터링 중단", command=self.stop_gui_automation).pack(side="left", padx=(8, 0))
+        ttk.Button(actions, text="원문 로그 보기", command=self.open_raw_log_window).pack(side="left", padx=(8, 0))
 
         self.watch_log = tk.Text(self.watch_tab, height=18, wrap="word")
         self.watch_log.grid(row=1, column=0, sticky="nsew")
@@ -1205,6 +1304,43 @@ class ExcelGui:
         self.root.after(0, lambda: self.append_watch_line(line))
         if status:
             self.root.after(0, lambda: self.status_var.set(status))
+
+    def raw_log_text(self) -> str:
+        with self.raw_log_lock:
+            logs = list(self.raw_logs)
+
+        if not logs:
+            return "아직 수신된 원문 로그가 없습니다."
+
+        return json.dumps(list(reversed(logs)), ensure_ascii=False, indent=2)
+
+    def open_raw_log_window(self) -> None:
+        window = tk.Toplevel(self.root)
+        window.title("개발자용 원문 로그")
+        window.geometry("920x640")
+        window.minsize(720, 420)
+        window.rowconfigure(1, weight=1)
+        window.columnconfigure(0, weight=1)
+
+        toolbar = ttk.Frame(window, padding=(10, 10, 10, 6))
+        toolbar.grid(row=0, column=0, sticky="ew")
+
+        text = tk.Text(window, wrap="none")
+        text.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
+
+        y_scroll = ttk.Scrollbar(window, orient="vertical", command=text.yview)
+        y_scroll.grid(row=1, column=1, sticky="ns", pady=(0, 10))
+        x_scroll = ttk.Scrollbar(window, orient="horizontal", command=text.xview)
+        x_scroll.grid(row=2, column=0, sticky="ew", padx=10)
+        text.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+
+        def refresh() -> None:
+            text.delete("1.0", tk.END)
+            text.insert(tk.END, self.raw_log_text())
+
+        ttk.Button(toolbar, text="새로고침", command=refresh).pack(side="left")
+        ttk.Label(toolbar, text="최근 30개 원문 로그를 표시합니다.").pack(side="left", padx=(10, 0))
+        refresh()
 
     def queue_extension_command(self, action: str) -> dict:
         with self.command_lock:
