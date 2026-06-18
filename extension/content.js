@@ -1,8 +1,9 @@
 (() => {
-  const HELPER_VERSION = "v2026-06-18-logo-name-hyphen-rawlog";
+  const HELPER_VERSION = "v2026-06-18-queue-task-id-guard";
   const USE_SAVED_BUYER_SKIP_RESUME = false;
   const COLLECTION_STATE_KEY = "exportGeniusQualifiedCollectionState";
   const LOCAL_GUI_URL = "http://127.0.0.1:8765";
+  const MAX_RECORD_NOT_FOUND_RECOVERY = 3;
 
   function textOf(element) {
     if (!element) {
@@ -1793,6 +1794,7 @@
     const target = Math.max(1, Number.parseInt(targetPage, 10) || 1);
     const expectedRow = Number.parseInt(expectedRowNumber, 10);
     const attempts = [];
+    let recordNotFoundRecoveries = 0;
 
     for (let attempt = 1; attempt <= 30; attempt += 1) {
       const stopped = await abortIfGuiStopRequested();
@@ -1804,7 +1806,27 @@
       const before = listPageSnapshot();
 
       if (currentPage === target) {
-        const candidates = await waitForImporterPageReady(target, expectedRow, 15000);
+        const readyCandidates = await waitForImporterPageReady(target, expectedRow, 15000);
+        if (readyCandidates === null && await getLocalGuiStopRequested()) {
+          return await abortIfGuiStopRequested();
+        }
+
+        const candidates = readyCandidates || [];
+        if (!candidates.length && pageShowsRecordNotFound() && recordNotFoundRecoveries < MAX_RECORD_NOT_FOUND_RECOVERY) {
+          recordNotFoundRecoveries += 1;
+          attempts.push({
+            attempt,
+            mode: "recover-current-page-record-not-found",
+            snapshot: listPageSnapshot(),
+            recovery: recordNotFoundRecoveries
+          });
+          await postLocalGuiLog(
+            `바이어 목록이 비어 있어 새로고침 복구를 시도합니다 (${recordNotFoundRecoveries}/${MAX_RECORD_NOT_FOUND_RECOVERY}).`,
+            "복구 시도"
+          );
+          await recoverRecordNotFoundResults(1);
+          continue;
+        }
         return {
           ok: Boolean(candidates.length),
           reason: candidates.length ? "" : "Target page reached but expected importer rows were not ready.",
@@ -1812,7 +1834,8 @@
           expectedRowNumber: Number.isFinite(expectedRow) ? expectedRow : null,
           currentPage,
           candidateCount: candidates.length,
-          rowRange: candidateRowRange(getImporterCandidates()),
+          candidates,
+          rowRange: candidateRowRange(candidates),
           attempts
         };
       }
@@ -1827,6 +1850,22 @@
       }
 
       if (!control) {
+        if (pageShowsRecordNotFound() && recordNotFoundRecoveries < MAX_RECORD_NOT_FOUND_RECOVERY) {
+          recordNotFoundRecoveries += 1;
+          attempts.push({
+            attempt,
+            mode: "recover-missing-page-control-record-not-found",
+            snapshot: listPageSnapshot(),
+            recovery: recordNotFoundRecoveries
+          });
+          await postLocalGuiLog(
+            `바이어 목록이 비어 있어 새로고침 복구를 시도합니다 (${recordNotFoundRecoveries}/${MAX_RECORD_NOT_FOUND_RECOVERY}).`,
+            "복구 시도"
+          );
+          await recoverRecordNotFoundResults(1);
+          continue;
+        }
+
         return {
           ok: false,
           reason: `Page ${target} control not found.`,
@@ -1863,9 +1902,20 @@
       });
 
       if (recordNotFound) {
+        if (recordNotFoundRecoveries < MAX_RECORD_NOT_FOUND_RECOVERY) {
+          recordNotFoundRecoveries += 1;
+          attempts[attempts.length - 1].recovery = recordNotFoundRecoveries;
+          await postLocalGuiLog(
+            `바이어 목록이 비어 있어 새로고침 복구를 시도합니다 (${recordNotFoundRecoveries}/${MAX_RECORD_NOT_FOUND_RECOVERY}).`,
+            "복구 시도"
+          );
+          await recoverRecordNotFoundResults(1);
+          continue;
+        }
+
         return {
           ok: false,
-          reason: `Importer page ${target} showed record not found during page jump.`,
+          reason: `Importer page ${target} showed record not found after ${MAX_RECORD_NOT_FOUND_RECOVERY} recovery attempts.`,
           targetPage: target,
           expectedRowNumber: Number.isFinite(expectedRow) ? expectedRow : null,
           currentPage: after.page,
@@ -1876,6 +1926,9 @@
 
       if (after.page === target) {
         const candidates = await waitForImporterPageReady(target, expectedRow, 30000);
+        if (candidates === null && await getLocalGuiStopRequested()) {
+          return await abortIfGuiStopRequested();
+        }
         const finalSnapshot = listPageSnapshot();
         attempts[attempts.length - 1].final = finalSnapshot;
 
@@ -1898,6 +1951,7 @@
           expectedRowNumber: Number.isFinite(expectedRow) ? expectedRow : null,
           currentPage: finalSnapshot.page,
           candidateCount: candidates.length,
+          candidates,
           rowRange: finalSnapshot.range,
           attempts
         };
@@ -1918,10 +1972,17 @@
   }
 
   async function goNextImporterPage() {
-    const before = listPageSnapshot();
+    let before = listPageSnapshot();
     const attempts = [];
+    let recordNotFoundRecoveries = 0;
 
     for (let attempt = 1; attempt <= 3; attempt += 1) {
+      const stopped = await abortIfGuiStopRequested();
+      if (stopped) {
+        return stopped;
+      }
+
+      before = listPageSnapshot();
       const next = findNextPageButton();
 
       if (!next) {
@@ -1931,6 +1992,16 @@
           reason: "Next page button not found.",
           snapshot: listPageSnapshot()
         });
+
+        if (pageShowsRecordNotFound() && recordNotFoundRecoveries < MAX_RECORD_NOT_FOUND_RECOVERY) {
+          recordNotFoundRecoveries += 1;
+          await postLocalGuiLog(
+            `바이어 목록이 비어 있어 새로고침 복구를 시도합니다 (${recordNotFoundRecoveries}/${MAX_RECORD_NOT_FOUND_RECOVERY}).`,
+            "복구 시도"
+          );
+          await recoverRecordNotFoundResults(1);
+          continue;
+        }
 
         if (attempt === 1) {
           await selectImportersTab();
@@ -1959,11 +2030,13 @@
       }, attempt === 1 ? 25000 : 35000, 600, 1500);
 
       const after = listPageSnapshot();
+      const recordNotFound = pageShowsRecordNotFound();
       attempts.push({
         attempt,
         ok: Boolean(candidates?.length),
         clicked,
-        after
+        after,
+        recordNotFound
       });
 
       if (candidates?.length) {
@@ -1986,15 +2059,29 @@
         };
       }
 
+      if (recordNotFound && recordNotFoundRecoveries < MAX_RECORD_NOT_FOUND_RECOVERY) {
+        recordNotFoundRecoveries += 1;
+        attempts[attempts.length - 1].recovery = recordNotFoundRecoveries;
+        await postLocalGuiLog(
+          `바이어 목록이 비어 있어 새로고침 복구를 시도합니다 (${recordNotFoundRecoveries}/${MAX_RECORD_NOT_FOUND_RECOVERY}).`,
+          "복구 시도"
+        );
+        await recoverRecordNotFoundResults(1);
+        continue;
+      }
+
       await sleep(1200 * attempt);
       await selectImportersTab();
       await waitForImporterResultsReady(12000);
     }
 
     const after = listPageSnapshot();
+    const exhaustedRecordNotFoundRecovery = recordNotFoundRecoveries >= MAX_RECORD_NOT_FOUND_RECOVERY && pageShowsRecordNotFound();
     return {
       ok: false,
-      reason: "Importer list did not change after clicking next page.",
+      reason: exhaustedRecordNotFoundRecovery
+        ? `Importer list still showed record not found after ${MAX_RECORD_NOT_FOUND_RECOVERY} recovery attempts.`
+        : "Importer list did not change after clicking next page.",
       beforeSignature: before.signature,
       afterSignature: after.signature,
       beforeUrl: before.url,
@@ -2005,6 +2092,7 @@
       afterRange: after.range,
       currentPage: after.page,
       candidateCount: after.candidateCount,
+      recordNotFoundRecoveryAttempts: recordNotFoundRecoveries,
       attempts
     };
   }
@@ -2295,16 +2383,9 @@
       matched
     });
 
-    /*
     await postLocalGuiLog(
-      `이어하기 상세 2차 확인: 목록명 ${checking.listCompanyName || "-"}, 상세페이지명 ${profileCompanyName || "(empty)"}, 결과 ${matched ? "일치" : "불일치"}`,
-      "이어하기"
-    );
-
-    */
-    await postLocalGuiLog(
-      `Resume profile check: list "${checking.listCompanyName || "-"}", profile "${profileCompanyName || "(empty)"}", result ${matched ? "matched" : "not matched"}`,
-      "Resume"
+      `[이어하기] 상세페이지 회사명 확인: ${profileCompanyName || "(비어 있음)"} - ${matched ? "일치" : "불일치"}`,
+      matched ? "이어하기" : "이어하기 중단"
     );
 
     if (!matched) {
@@ -2351,7 +2432,7 @@
       profileUrl
     };
     await postLocalGuiLog(
-      `이어하기 위치 확정: 브라우저 ${checking.rowNumber || "-"}번 일치, ${nextRowNumber}번부터 수집 시작`,
+      `[이어하기 완료] ${checking.rowNumber || "-"}번 확인 완료, ${nextRowNumber}번부터 수집합니다.`,
       "이어하기"
     );
     writeCollectionState(state);
@@ -2382,7 +2463,7 @@
     let rowRange = candidateRowRange(currentCandidates);
     const checked = new Set(state.resumeAnchorChecked || []);
     await postLocalGuiLog(
-      `이어하기 기준 확인: 엑셀 마지막 번호 ${initialMinimumRowNumber}, 엑셀 파일명 "${state.resumeAnchorBuyerName}", key ${state.resumeAnchorBuyerKey}`,
+      `[이어하기] 마지막 저장 파일: ${initialMinimumRowNumber}. ${state.resumeAnchorBuyerName}`,
       "이어하기"
     );
 
@@ -2404,7 +2485,7 @@
       const targetPage = importerPageForRow(minimumRowNumber, inferImporterPageSize(rowRange));
       if (currentPaginationPage() !== targetPage) {
         await postLocalGuiLog(
-          `이어하기 페이지 이동: 엑셀 마지막 번호 ${initialMinimumRowNumber}, 브라우저 ${minimumRowNumber}번 기준 ${targetPage}페이지`,
+          `[이어하기] ${targetPage}페이지에서 위치를 찾습니다. (${minimumRowNumber}번 기준)`,
           "페이지 이동"
         );
         const jumped = await goToImporterPage(targetPage, minimumRowNumber);
@@ -2418,7 +2499,9 @@
         }
 
         if (jumped.ok) {
-          currentCandidates = await waitForImporterResultsReady(25000);
+          currentCandidates = jumped.candidates?.length
+            ? jumped.candidates
+            : await waitForImporterResultsReady(8000);
           rowRange = candidateRowRange(currentCandidates);
         } else {
           state.summary.reason = jumped.reason || `Could not reach importer page ${targetPage}.`;
@@ -2432,8 +2515,8 @@
       const listMatchedIdentity = identities.find((item) => item.companyKey === state.resumeAnchorBuyerKey);
       await postLocalGuiLog(
         listMatchedIdentity
-          ? `이어하기 목록 1차 일치: ${currentPaginationPage() || "-"}페이지 ${listMatchedIdentity.rowNumber || "-"}번 ${listMatchedIdentity.listCompanyName}`
-          : `이어하기 목록 1차 일치 없음: ${currentPaginationPage() || "-"}페이지 후보 ${summarizeImporterIdentities(identities)}`,
+          ? `[이어하기] 목록에서 같은 이름 발견: ${listMatchedIdentity.rowNumber || "-"}번 ${listMatchedIdentity.listCompanyName}`
+          : `[이어하기] ${currentPaginationPage() || "-"}페이지에서 같은 이름을 찾지 못해 순서대로 확인합니다.`,
         "이어하기"
       );
 
@@ -2441,7 +2524,7 @@
 
       if (identity) {
         await postLocalGuiLog(
-          `이어하기 후보 선택: ${identity.rowNumber || "-"}번 ${identity.listCompanyName} (${identity.listNameMatchedAnchor ? "목록명 일치" : "순차 확인"})`,
+          `[이어하기] 상세페이지 확인 중: ${identity.rowNumber || "-"}번 ${identity.listCompanyName}`,
           "이어하기"
         );
 
@@ -2464,11 +2547,11 @@
         }
 
         await postLocalGuiLog(
-          `이어하기 상세 2차 확인: 목록명 ${identity.listCompanyName}, 상세페이지명 ${inspected.profileCompanyName || "(empty)"}, 결과 ${inspected.matched ? "일치" : "불일치"}`,
-          "이어하기"
+          `[이어하기] 상세페이지 회사명 확인: ${inspected.profileCompanyName || "(비어 있음)"} - ${inspected.matched ? "일치" : "불일치"}`,
+          inspected.matched ? "이어하기" : "이어하기 중단"
         );
 
-        currentCandidates = inspected.candidates?.length ? inspected.candidates : await waitForImporterResultsReady(25000);
+        currentCandidates = inspected.candidates?.length ? inspected.candidates : await waitForImporterResultsReady(8000);
         rowRange = candidateRowRange(currentCandidates);
 
         state.summary.diagnostics.resumeAnchorLastCheck = {
@@ -2504,7 +2587,7 @@
               profileUrl: inspected.profileUrl || ""
             };
             await postLocalGuiLog(
-              `이어하기 후보 불일치: 목록명 ${identity.listCompanyName}, 상세페이지명 ${profileName}`,
+              `[이어하기 중단] 목록명과 상세페이지 회사명이 다릅니다: ${identity.listCompanyName} / ${profileName}`,
               "이어하기 중단"
             );
             writeCollectionState(state);
@@ -2534,7 +2617,7 @@
           profileUrl: inspected.profileUrl
         };
         await postLocalGuiLog(
-          `이어하기 위치 확정: 브라우저 ${identity.rowNumber || "-"}번 일치, ${nextRowNumber}번부터 수집 시작`,
+          `[이어하기 완료] ${identity.rowNumber || "-"}번 확인 완료, ${nextRowNumber}번부터 수집합니다.`,
           "이어하기"
         );
         writeCollectionState(state);
@@ -3202,7 +3285,24 @@
     return "data collection failed";
   }
 
-  async function collectExcelData(hsCode) {
+  function formatPercent(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) {
+      return "-";
+    }
+
+    return `${number.toFixed(2).replace(/\.?0+$/, "")}%`;
+  }
+
+  function formatPlainNumber(value) {
+    const digits = String(value || "").replace(/[^\d.]/g, "");
+    const number = Number(digits);
+    return Number.isFinite(number) && digits
+      ? number.toLocaleString("en-US")
+      : String(value || "-");
+  }
+
+  async function collectExcelData(hsCode, displayCompanyName = "") {
     const code = String(hsCode || "").trim();
     const stoppedBeforeCommodity = await abortIfGuiStopRequested();
     if (stoppedBeforeCommodity) {
@@ -3216,6 +3316,10 @@
     }
 
     if (commodityValue.ok && commodityValue.qualified === false) {
+      await postLocalGuiLog(
+        `[조건 확인] HS ${code} 비중 ${formatPercent(commodityValue.importValuePercent)} - 기준 미달`,
+        "조건 미달"
+      );
       return {
         ok: false,
         skipped: true,
@@ -3227,6 +3331,10 @@
     }
 
     if (!commodityValue.ok || commodityValue.qualified !== true) {
+      await postLocalGuiLog(
+        `[조건 확인 실패] HS ${code} 비중을 확인하지 못했습니다.`,
+        "조건 확인 실패"
+      );
       return {
         ok: false,
         skipped: false,
@@ -3239,6 +3347,12 @@
         }
       };
     }
+
+    await postLocalGuiLog(
+      `[조건 확인] HS ${code} 비중 ${formatPercent(commodityValue.importValuePercent)} - 기준 통과`,
+      "조건 통과"
+    );
+    await postLocalGuiLog(`[정보 수집] ${displayCompanyName || "회사 상세정보"}`);
 
     const overview = await scrapeOverviewProfile();
     const stoppedAfterOverview = await abortIfGuiStopRequested();
@@ -3358,6 +3472,7 @@
     const alreadySavedBuyers = options.alreadySavedBuyers || [];
     const resumeStartRowNumber = Math.max(1, Number.parseInt(options.resumeStartRowNumber, 10) || 1);
     const resumeAnchorBuyer = options.resumeAnchorBuyer || {};
+    const queueTaskId = String(options.queueTaskId || "").trim();
     const resumeAnchorBuyerName = String(resumeAnchorBuyer.buyerName || "").trim();
     const resumeAnchorBuyerKey = companyKeyFromName(resumeAnchorBuyerName);
     const resumeAnchorIndex = Number.parseInt(resumeAnchorBuyer.index, 10) || 0;
@@ -3373,6 +3488,7 @@
       phase: "results",
       hsCode: String(hsCode || "").trim(),
       targetCount,
+      queueTaskId,
       resultsUrl,
       resumeStartRowNumber,
       resumeAnchorBuyerName,
@@ -3386,6 +3502,7 @@
         ok: false,
         mode: "list",
         targetCount,
+        queueTaskId,
         qualifiedSaved: 0,
         visited: 0,
         skipped: 0,
@@ -3395,6 +3512,7 @@
         diagnostics: {
           resultsUrl,
           startedAt: new Date().toISOString(),
+          queueTaskId,
           resumeMode: true,
           resumeStartRowNumber,
           resumeAnchorBuyerName,
@@ -3508,9 +3626,9 @@
           reason: "company profile did not finish rendering",
           profileUrl
         });
+        await postLocalGuiBlankLine();
       } else {
-        await postLocalGuiLog(`정보 확인 중: ${listCompanyName}`);
-        const result = await collectExcelData(state.hsCode);
+        const result = await collectExcelData(state.hsCode, listCompanyName);
         if (result.stopped) {
           state.active = false;
           state.summary.ok = false;
@@ -3522,7 +3640,11 @@
         state.summary.visited += 1;
 
         if (result.downloaded) {
-          await postLocalGuiLog(`엑셀 저장 완료: ${result.excel?.pink?.Company_Name || listCompanyName}`);
+          const outputFileName = String(result.outputFile || "").split(/[\\/]/).pop();
+          await postLocalGuiLog(
+            `[엑셀 저장 완료] ${outputFileName || result.excel?.pink?.Company_Name || listCompanyName}`,
+            "엑셀 저장 완료"
+          );
           state.summary.qualifiedSaved += 1;
           state.summary.companies.push({
             companyName: result.excel?.pink?.Company_Name || listCompanyName,
@@ -3532,8 +3654,9 @@
             outputFile: result.outputFile,
             profileUrl
           });
+          await postLocalGuiBlankLine();
         } else if (result.skipped) {
-          await postLocalGuiLog(`조건 미달: ${listCompanyName}`);
+          await postLocalGuiLog(`[조건 미달] ${listCompanyName}`, "조건 미달");
           state.summary.skipped += 1;
           state.summary.companies.push({
             companyName: listCompanyName,
@@ -3542,8 +3665,9 @@
             reason: result.reason,
             profileUrl
           });
+          await postLocalGuiBlankLine();
         } else {
-          await postLocalGuiLog(`오류 발생: ${listCompanyName} - ${friendlyReason(result.reason)}`);
+          await postLocalGuiLog(`[오류] ${listCompanyName} - ${friendlyReason(result.reason)}`, "오류 발생");
           state.summary.failed += 1;
           state.summary.companies.push({
             companyName: listCompanyName,
@@ -3554,6 +3678,7 @@
             profileUrl,
             diagnostics: result.diagnostics || result.download || null
           });
+          await postLocalGuiBlankLine();
 
           if (result.fatal) {
             state.active = false;
@@ -3654,7 +3779,7 @@
     let rowRange = candidateRowRange(candidates);
     const targetResumePage = importerPageForRow(resumeStartRowNumber, inferImporterPageSize(rowRange));
     if (currentPaginationPage() !== targetResumePage) {
-      await postLocalGuiLog(`브라우저 ${resumeStartRowNumber}번 기준 ${targetResumePage}페이지로 이동합니다.`, "페이지 이동");
+      await postLocalGuiLog(`[페이지 이동] ${targetResumePage}페이지로 이동합니다. (${resumeStartRowNumber}번 기준)`, "페이지 이동");
       const jumped = await goToImporterPage(targetResumePage, resumeStartRowNumber);
       state.summary.diagnostics.lastPageJump = jumped;
       if (jumped.stopped) {
@@ -3666,7 +3791,9 @@
       }
 
       if (jumped.ok) {
-        candidates = await waitForImporterResultsReady(25000);
+        candidates = jumped.candidates?.length
+          ? jumped.candidates
+          : await waitForImporterResultsReady(8000);
         rowRange = candidateRowRange(candidates);
       } else {
         state.summary.reason = jumped.reason || `Could not reach importer page ${targetResumePage}.`;
@@ -3742,7 +3869,7 @@
     const companyKey = companyKeyFromElement(target);
     const rowNumber = importerRowNumberFromElement(target);
     visitedCompanyKeys.add(companyKey);
-    await postLocalGuiLog(`바이어 확인 중: ${rowNumber || "-"}번 ${companyName}`);
+    await postLocalGuiLog(`[바이어 확인] ${rowNumber || "-"}번 ${companyName}`, "바이어 확인");
 
     state.visitedCompanyKeys = Array.from(visitedCompanyKeys);
     state.currentCompany = {
@@ -3812,6 +3939,10 @@
   }
 
   async function autoResumeQualifiedCollection() {
+    if (localGuiCommandRunning) {
+      return;
+    }
+
     const state = readCollectionState();
     if (!state?.active) {
       return;
@@ -3819,8 +3950,11 @@
 
     showResult(resultFromCollectionState(state, { resuming: true, reason: "Auto-resume waiting for page." }));
 
+    localGuiCommandRunning = true;
     try {
       const result = await continueQualifiedCollection(state);
+      showResult(result);
+      await reportFinishedCollectionToGui(result, "auto-resume");
     } catch (error) {
       const failedState = readCollectionState() || state;
       failedState.active = false;
@@ -3833,7 +3967,11 @@
         failedAt: new Date().toISOString()
       };
       writeCollectionState(failedState);
-      showResult(resultFromCollectionState(failedState));
+      const failedResult = resultFromCollectionState(failedState);
+      showResult(failedResult);
+      await reportFinishedCollectionToGui(failedResult, "auto-resume-error");
+    } finally {
+      localGuiCommandRunning = false;
     }
   }
 
@@ -4005,8 +4143,9 @@
     return fetchLocalGui("/queue/current");
   }
 
-  async function completeLocalGuiQueueTask(collection) {
+  async function completeLocalGuiQueueTask(collection, task = null) {
     const params = new URLSearchParams({
+      taskId: collection?.queueTaskId || task?.queueTaskId || "",
       saved: String(collection?.qualifiedSaved ?? ""),
       visited: String(collection?.visited ?? ""),
       reason: collection?.reason || ""
@@ -4014,11 +4153,75 @@
     return fetchLocalGui(`/queue/complete?${params.toString()}`);
   }
 
-  async function failLocalGuiQueueTask(reason) {
+  async function failLocalGuiQueueTask(reason, task = null) {
     const params = new URLSearchParams({
+      taskId: task?.queueTaskId || "",
       reason: reason || "Queue automation failed."
     });
     return fetchLocalGui(`/queue/fail?${params.toString()}`);
+  }
+
+  async function reportFinishedCollectionToGui(collection, source = "auto-resume") {
+    if (!collection || collection.active || collection.resuming) {
+      return { ok: true, reported: false, reason: "Collection is still active." };
+    }
+
+    const state = readCollectionState();
+    if (state?.summary?.diagnostics?.guiQueueReportedAt) {
+      return { ok: true, reported: false, reason: "Collection was already reported." };
+    }
+
+    const report = collection.ok
+      ? await completeLocalGuiQueueTask(collection)
+      : await failLocalGuiQueueTask(collection.reason || "Auto-resumed queue task failed.", { queueTaskId: collection.queueTaskId || "" });
+
+    await postLocalGuiRawLog({
+      type: "queue-report",
+      source,
+      collection,
+      report
+    });
+
+    if (!report.ok && report.data?.stale) {
+      return {
+        ok: true,
+        reported: false,
+        stale: true,
+        report
+      };
+    }
+
+    if (state) {
+      state.summary = state.summary || {};
+      state.summary.diagnostics = {
+        ...(state.summary.diagnostics || {}),
+        guiQueueReportedAt: new Date().toISOString(),
+        guiQueueReportSource: source,
+        guiQueueReportOk: Boolean(report.ok),
+        guiQueueReportReason: report.data?.reason || report.reason || ""
+      };
+      writeCollectionState(state);
+    }
+
+    if (!report.ok) {
+      await postLocalGuiLog(
+        `자동 작업 결과 보고 실패: ${report.data?.reason || report.reason || "unknown error"}`,
+        "오류 발생"
+      );
+    }
+
+    const output = {
+      ok: Boolean(report.ok),
+      reported: true,
+      report
+    };
+
+    if (collection.ok && report.ok && report.data && report.data.done === false) {
+      await postLocalGuiLog("다음 작업을 이어서 시작합니다.", "Running task");
+      output.nextRun = await startLocalGuiQueueAutomation();
+    }
+
+    return output;
   }
 
   async function postLocalGuiLog(message, status = "") {
@@ -4027,6 +4230,10 @@
       status: status || ""
     });
     return fetchLocalGui(`/log?${params.toString()}`);
+  }
+
+  async function postLocalGuiBlankLine() {
+    return postLocalGuiLog("\u200b");
   }
 
   async function getLocalGuiCommand() {
@@ -4089,11 +4296,23 @@
       return loaded;
     }
 
+    await postLocalGuiLog(
+      `[조건 설정] HS ${task.hsCode} / USD ${formatPlainNumber(task.minValue)} ~ ${formatPlainNumber(task.maxValue)}`,
+      "조건 설정"
+    );
+
     const criteria = await applyUserCriteria({
       hsCode: task.hsCode,
       minValue: task.minValue,
       maxValue: task.maxValue
     });
+
+    await postLocalGuiLog(
+      criteria.ok
+        ? "[조건 설정 완료] 바이어 목록을 확인합니다."
+        : `[조건 설정 실패] ${friendlyReason(criteria.totalValue?.reason || criteria.reason || "검색 조건을 적용하지 못했습니다.")}`,
+      criteria.ok ? "조건 설정 완료" : "조건 설정 실패"
+    );
 
     return {
       ok: Boolean(criteria.ok),
@@ -4147,7 +4366,8 @@
     const collection = await collectQualifiedCompanies(task.hsCode, remainingCount, {
       alreadySavedBuyers: task.alreadySavedBuyers || [],
       resumeStartRowNumber: alreadySaved + 1,
-      resumeAnchorBuyer: task.lastSavedBuyer || {}
+      resumeAnchorBuyer: task.lastSavedBuyer || {},
+      queueTaskId: task.queueTaskId || ""
     });
 
     return {
@@ -4156,6 +4376,7 @@
       targetCount,
       alreadySaved,
       remainingCount,
+      queueTaskId: task.queueTaskId || "",
       collection
     };
   }
@@ -4183,21 +4404,29 @@
   async function logCollectionForGui(task, collection, run = null) {
     if (!collection) {
       const reason = run?.criteria?.totalValue?.reason || run?.criteria?.reason || run?.reason || "Task could not start.";
-      await postLocalGuiLog(`${task.company} / HS ${task.hsCode}: ${friendlyReason(reason)}`, "Error");
+      await postLocalGuiLog(`[작업 오류] ${task.company} / HS ${task.hsCode}: ${friendlyReason(reason)}`, "오류 발생");
+      return;
+    }
+
+    if (collection.ok) {
+      const totalSaved = Number(run?.alreadySaved || 0) + Number(collection.qualifiedSaved || 0);
+      await postLocalGuiLog(`[작업 완료] ${task.company} / HS ${task.hsCode}`, "작업 완료");
+      await postLocalGuiLog(`저장: ${totalSaved}/${run?.targetCount || collection.targetCount || "-"}`);
       return;
     }
 
     await postLocalGuiLog(
-      `${task.company} / HS ${task.hsCode} result: saved ${collection.qualifiedSaved || 0}`,
-      "Task checked"
+      `[작업 중단] ${task.company} / HS ${task.hsCode}: ${friendlyReason(collection.reason || run?.reason || "")}`,
+      "오류 발생"
     );
   }
 
   async function startLocalGuiQueueAutomation() {
     const results = [];
     let guard = 0;
+    let activeTask = null;
 
-    await postLocalGuiLog("Automation started.", "Monitoring");
+    await postLocalGuiLog("[자동화 시작] 선택한 작업을 순서대로 진행합니다.", "Monitoring");
 
     while (guard < 200) {
       guard += 1;
@@ -4233,9 +4462,14 @@
       }
 
       const task = current.data?.task;
+      activeTask = task;
+      await postLocalGuiBlankLine();
       await postLocalGuiLog(
-        `${current.data?.queuePosition}/${current.data?.queueTotal} running: ${task.company} / HS ${task.hsCode} - current ${task.alreadySaved || 0}/${task.targetCount}, remaining ${task.remainingCount || task.targetCount}`,
-        "Running task"
+        `[작업 시작] ${current.data?.queuePosition || "-"} / ${current.data?.queueTotal || "-"} - ${task.company} / HS ${task.hsCode}`,
+        "작업 시작"
+      );
+      await postLocalGuiLog(
+        `목표: ${task.targetCount}개 | 기존 저장: ${task.alreadySaved || 0}개 | 추가 수집: ${task.remainingCount || task.targetCount}개`
       );
       const run = await startLocalGuiTaskAutomation();
       results.push({
@@ -4259,7 +4493,7 @@
       }
 
       if (!run.ok) {
-        await failLocalGuiQueueTask(run.collection?.reason || run.reason || "Current queue task failed.");
+        await failLocalGuiQueueTask(run.collection?.reason || run.reason || "Current queue task failed.", task);
         await postLocalGuiLog(`오류 발생: ${task.company} 작업이 중단되었습니다.`, "오류 발생");
         return {
           ok: false,
@@ -4270,11 +4504,20 @@
         };
       }
 
-      const completed = await completeLocalGuiQueueTask(run.collection);
+      const completed = await completeLocalGuiQueueTask(run.collection, task);
       results[results.length - 1].completed = completed;
 
       if (!completed.ok) {
-        await failLocalGuiQueueTask(completed.data?.reason || completed.reason || "Could not complete queue task.");
+        if (completed.data?.stale) {
+          await postLocalGuiRawLog({
+            type: "stale-queue-complete-ignored",
+            task,
+            completed
+          });
+          continue;
+        }
+
+        await failLocalGuiQueueTask(completed.data?.reason || completed.reason || "Could not complete queue task.", task);
         await postLocalGuiLog(`오류 발생: ${task.company} 저장 파일 수를 확인하지 못했습니다.`, "오류 발생");
         return {
           ok: false,
@@ -4287,6 +4530,7 @@
 
       if (completed.data?.done) {
         await postLocalGuiLog("모든 선택 작업이 완료되었습니다.", "완료");
+        await postLocalGuiBlankLine();
         return {
           ok: true,
           done: true,
@@ -4294,9 +4538,12 @@
           reason: "Queue completed."
         };
       }
+
+      await postLocalGuiBlankLine();
+      await postLocalGuiLog("다음 작업을 준비합니다.", "작업 준비");
     }
 
-    await failLocalGuiQueueTask("Queue guard limit reached.");
+    await failLocalGuiQueueTask("Queue guard limit reached.", activeTask);
     await postLocalGuiLog("오류 발생: 작업 반복 횟수가 너무 많아 중단했습니다.", "오류 발생");
     return {
       ok: false,
@@ -4372,6 +4619,10 @@
       return;
     }
 
+    if (!location.href.includes("/search-results")) {
+      return;
+    }
+
     const result = await getLocalGuiCommand();
     const command = result.data?.command;
     if (result.ok && command) {
@@ -4406,7 +4657,11 @@
   };
 
   setTimeout(async () => {
-    await postLocalGuiLog(`Extension ready: ${HELPER_VERSION}`, "Extension ready");
+    await postLocalGuiRawLog({
+      type: "extension-ready",
+      version: HELPER_VERSION,
+      url: location.href
+    });
     await pollLocalGuiCommands();
   }, 500);
   setTimeout(autoResumeQualifiedCollection, 1200);

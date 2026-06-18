@@ -257,17 +257,26 @@ def wait_until_json_ready(path: Path, attempts: int = 8, delay_seconds: float = 
     return load_data(path)
 
 
-def next_output_path(folder: Path, buyer_name: str) -> Path:
+def next_output_path(folder: Path, buyer_name: str, related_folders: list[Path] | None = None) -> Path:
     existing_indexes: list[int] = []
-    existing_count = count_xlsx_files(folder)
+    existing_paths: set[Path] = set()
+    folders = related_folders or [folder]
 
-    if folder.exists():
-        for path in folder.glob("*.xlsx"):
+    for related_folder in folders:
+        if not related_folder.exists():
+            continue
+
+        for path in related_folder.glob("*.xlsx"):
+            resolved = path.resolve()
+            if resolved in existing_paths:
+                continue
+
+            existing_paths.add(resolved)
             prefix = path.stem.split(".", 1)[0].strip()
             if prefix.isdigit():
                 existing_indexes.append(int(prefix))
 
-    index = max(existing_indexes + [existing_count], default=0) + 1
+    index = max(existing_indexes + [len(existing_paths)], default=0) + 1
     buyer_file_name = safe_filename(buyer_name)
     output_path = folder / f"{index}. {buyer_file_name}.xlsx"
 
@@ -439,6 +448,8 @@ class ExcelGui:
         self.queue_indices: list[int] = []
         self.queue_position = 0
         self.queue_active = False
+        self.queue_run_id = ""
+        self.queue_task_ids: dict[int, str] = {}
         self.queue_lock = threading.Lock()
         self.watch_thread: threading.Thread | None = None
         self.stop_event = threading.Event()
@@ -529,7 +540,13 @@ class ExcelGui:
             "task": task,
         }
 
-    def task_payload(self, task: ExportTask, task_number: int, target_count: int | str) -> dict:
+    def task_payload(
+        self,
+        task: ExportTask,
+        task_number: int,
+        target_count: int | str,
+        queue_task_id: str | None = None,
+    ) -> dict:
         output_root = Path(self.output_dir_var.get())
         already_saved = count_task_xlsx_files(output_root, task)
         already_saved_buyers = saved_buyer_names_for_task(output_root, task)
@@ -547,6 +564,7 @@ class ExcelGui:
             "remainingCount": str(remaining_count),
             "alreadySavedBuyers": already_saved_buyers,
             "lastSavedBuyer": last_saved_buyer,
+            "queueTaskId": queue_task_id or "",
         }
 
     def set_current_task_payload(self, payload: dict | None) -> None:
@@ -560,6 +578,7 @@ class ExcelGui:
 
             if self.queue_position >= len(self.queue_indices):
                 self.queue_active = False
+                self.queue_task_ids = {}
                 self.set_current_task_payload(None)
                 return {"ok": True, "done": True, "reason": "Queue completed."}
 
@@ -568,7 +587,8 @@ class ExcelGui:
             task = row["task"]
             target = row["target"]
             row["status"] = "진행중"
-            payload = self.task_payload(task, row_index + 1, target)
+            queue_task_id = self.queue_task_ids.get(row_index, "")
+            payload = self.task_payload(task, row_index + 1, target, queue_task_id)
             self.set_current_task_payload(payload)
 
             self.root.after(0, self.refresh_task_tree)
@@ -589,6 +609,22 @@ class ExcelGui:
             row = self.task_rows[row_index]
             task = row["task"]
             target = int(row["target"])
+            expected_task_id = self.queue_task_ids.get(row_index, "")
+
+            requested_task_id = (query.get("taskId") or [""])[0]
+            if expected_task_id and requested_task_id != expected_task_id:
+                reason = "완료 보고가 현재 작업과 일치하지 않아 무시했습니다."
+                self.post_watch_message(
+                    f"자동 작업 완료 보고 무시: {task.company} / {task.hscode} - {reason}",
+                    f"오류: {reason}",
+                )
+                return {
+                    "ok": False,
+                    "stale": True,
+                    "reason": reason,
+                    "expectedTaskId": expected_task_id,
+                    "receivedTaskId": requested_task_id,
+                }
 
         task_dir = task_output_dir(Path(self.output_dir_var.get()), task)
         deadline = time.time() + 20
@@ -613,12 +649,18 @@ class ExcelGui:
 
             if done:
                 self.queue_active = False
+                self.queue_task_ids = {}
                 next_payload = None
             else:
                 next_row_index = self.queue_indices[self.queue_position]
                 next_row = self.task_rows[next_row_index]
                 next_row["status"] = "준비됨"
-                next_payload = self.task_payload(next_row["task"], next_row_index + 1, next_row["target"])
+                next_payload = self.task_payload(
+                    next_row["task"],
+                    next_row_index + 1,
+                    next_row["target"],
+                    self.queue_task_ids.get(next_row_index, ""),
+                )
 
             self.set_current_task_payload(next_payload)
 
@@ -635,12 +677,25 @@ class ExcelGui:
 
     def local_queue_fail_payload(self, query: dict[str, list[str]]) -> dict:
         reason = (query.get("reason") or [""])[0] or "확장프로그램 작업 실패"
+        requested_task_id = (query.get("taskId") or [""])[0]
 
         with self.queue_lock:
             if self.queue_active and self.queue_position < len(self.queue_indices):
                 row_index = self.queue_indices[self.queue_position]
+                expected_task_id = self.queue_task_ids.get(row_index, "")
+                if expected_task_id and requested_task_id != expected_task_id:
+                    stale_reason = "실패 보고가 현재 작업과 일치하지 않아 무시했습니다."
+                    self.post_watch_message(f"자동 작업 실패 보고 무시: {stale_reason}", f"오류: {stale_reason}")
+                    return {
+                        "ok": False,
+                        "stale": True,
+                        "reason": stale_reason,
+                        "expectedTaskId": expected_task_id,
+                        "receivedTaskId": requested_task_id,
+                    }
                 self.task_rows[row_index]["status"] = "오류"
             self.queue_active = False
+            self.queue_task_ids = {}
             self.set_current_task_payload(None)
 
         self.root.after(0, self.refresh_task_tree)
@@ -803,7 +858,7 @@ class ExcelGui:
                         self.task_rows[row_index]["status"] = f"저장 {output_count}/{target}"
 
             self.root.after(0, self.refresh_task_tree)
-            self.post_watch_message(f"저장 성공 {output_count}/{target}: {output_path.name}")
+            self.post_watch_message(f"[엑셀 생성] {output_count}/{target}: {output_path.name}")
             return {
                 "ok": True,
                 "converted": True,
@@ -1202,9 +1257,21 @@ class ExcelGui:
                 self.queue_indices = resumable_indexes
                 self.queue_position = 0
                 self.queue_active = True
+                self.queue_run_id = str(int(time.time() * 1000))
+                self.queue_task_ids = {
+                    row_index: f"{self.queue_run_id}:{position + 1}:{row_index + 1}"
+                    for position, row_index in enumerate(self.queue_indices)
+                }
                 first_index = self.queue_indices[0]
                 first_row = self.task_rows[first_index]
-                self.set_current_task_payload(self.task_payload(first_row["task"], first_index + 1, first_row["target"]))
+                self.set_current_task_payload(
+                    self.task_payload(
+                        first_row["task"],
+                        first_index + 1,
+                        first_row["target"],
+                        self.queue_task_ids.get(first_index, ""),
+                    )
+                )
                 self.task_rows[first_index]["status"] = "준비됨"
 
             self.refresh_task_tree()
@@ -1493,7 +1560,11 @@ class ExcelGui:
         if not json_filename_matches_buyer(json_path, buyer_name):
             raise ValueError(f"{json_path.name} 파일명과 JSON 내부 바이어명({buyer_name})이 일치하지 않습니다.")
 
-        output_path = next_output_path(task_dir, buyer_name)
+        output_path = next_output_path(
+            task_dir,
+            buyer_name,
+            task_output_dirs(Path(self.output_dir_var.get()), task),
+        )
         fill_workbook(template_path, json_path, output_path)
 
         move_json_to_folder(json_path, task_dir / "_json_backup")
