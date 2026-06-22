@@ -1,9 +1,10 @@
 (() => {
-  const HELPER_VERSION = "v2026-06-22-human-paced-actions";
+  const HELPER_VERSION = "v2026-06-22-persistent-record-recovery";
   const EXTENSION_VERSION = chrome.runtime?.getManifest?.().version || "";
   const LOCAL_API_VERSION = 1;
   const USE_SAVED_BUYER_SKIP_RESUME = false;
   const COLLECTION_STATE_KEY = "exportGeniusQualifiedCollectionState";
+  const RECORD_NOT_FOUND_RECOVERY_KEY = "exportGeniusRecordNotFoundRecovery";
   const LOCAL_GUI_URL = "http://127.0.0.1:8765";
   const MAX_RECORD_NOT_FOUND_RECOVERY = 3;
   const HUMAN_DELAY_RANGES = Object.freeze({
@@ -887,6 +888,83 @@
     };
   }
 
+  function canonicalCriteriaNumber(value) {
+    const cleaned = String(value ?? "").replace(/,/g, "").trim();
+    const parsed = Number(cleaned);
+    return Number.isFinite(parsed) ? String(Math.trunc(parsed)) : cleaned.replace(/\D/g, "");
+  }
+
+  function appliedCriteriaTextSnapshot() {
+    const texts = Array.from(document.querySelectorAll("div, span, p, label, strong"))
+      .filter((element) => {
+        if (!visibleElement(element) || isResultsTableElement(element)) {
+          return false;
+        }
+
+        const text = normalizeText(textOf(element));
+        return text.length <= 300 && (text.includes("hscode") || text.includes("totalvalueusd"));
+      })
+      .map((element) => textOf(element))
+      .filter(Boolean);
+
+    return Array.from(new Set(texts)).sort((a, b) => a.length - b.length);
+  }
+
+  function inspectAppliedCriteria(options) {
+    const hsCode = canonicalCriteriaNumber(options.hsCode);
+    const minValue = canonicalCriteriaNumber(options.minValue);
+    const maxValue = canonicalCriteriaNumber(options.maxValue);
+    const expectedRange = options.dateRange || getLastOneYearRange();
+    const startInput = document.querySelector("input[placeholder='Start date']");
+    const endInput = document.querySelector("input[placeholder='End date']");
+    const criteriaTexts = appliedCriteriaTextSnapshot();
+    const normalizedTexts = criteriaTexts.map(normalizeText);
+    const expectedHsText = `hscodebeginwith${hsCode}`;
+    const expectedUsdText = `totalvalueusdisbetween${minValue}${maxValue}`;
+    const hsMatches = normalizedTexts.filter((text) => text.includes(expectedHsText));
+    const usdMatches = normalizedTexts.filter((text) => text.includes(expectedUsdText));
+    const filterCount = appliedFilterCount();
+    const datesMatch = Boolean(
+      startInput && endInput &&
+      startInput.value === expectedRange.start &&
+      endInput.value === expectedRange.end
+    );
+
+    const checks = {
+      exactFilterCount: filterCount === 2,
+      hsCode: hsMatches.length > 0,
+      totalValueUsd: usdMatches.length > 0,
+      dates: datesMatch
+    };
+
+    return {
+      ok: Object.values(checks).every(Boolean),
+      checks,
+      expected: {
+        hsCode,
+        minValue,
+        maxValue,
+        filterCount: 2,
+        dateRange: expectedRange
+      },
+      actual: {
+        filterCount,
+        startDate: startInput?.value || "",
+        endDate: endInput?.value || "",
+        criteriaTexts
+      }
+    };
+  }
+
+  async function verifyAppliedCriteria(options, timeoutMs = 12000) {
+    const verified = await waitUntil(() => {
+      const snapshot = inspectAppliedCriteria(options);
+      return snapshot.ok ? snapshot : null;
+    }, timeoutMs, 400, 500);
+
+    return verified || inspectAppliedCriteria(options);
+  }
+
   function formatDate(date) {
     const year = date.getFullYear();
     const month = String(date.getMonth() + 1).padStart(2, "0");
@@ -1466,7 +1544,7 @@
     };
   }
 
-  async function applyUserCriteria(options) {
+  async function applyUserCriteriaOnce(options) {
     const hsCode = String(options.hsCode || "").trim();
     const minValue = String(options.minValue || "50000").trim();
     const maxValue = String(options.maxValue || "5000000").trim();
@@ -1496,17 +1574,30 @@
 
     const importersTab = await selectImportersTab();
     await humanPause(700, 1200);
-    let totalValue = await applyTotalValueRange(minValue, maxValue);
-    if (!totalValue.ok) {
-      await humanPause(1200, 1800);
-      totalValue = await applyTotalValueRange(minValue, maxValue);
-    }
+    const totalValue = await applyTotalValueRange(minValue, maxValue);
     await humanPause(700, 1200);
     const removeUnknownExporter = await enableRemoveUnknownExporter();
     await waitForImporterCandidates(8000);
+    await humanPause(900, 1600);
+    const verification = await verifyAppliedCriteria({
+      hsCode,
+      minValue,
+      maxValue,
+      dateRange: dates.range
+    });
+    const stageFailureReason = [
+      resetCriteria,
+      dates,
+      hsFilter,
+      applyHs,
+      importersTab,
+      totalValue,
+      removeUnknownExporter
+    ].find((result) => result && result.ok === false)?.reason || "";
 
     return {
-      ok: resetCriteria.ok && dates.ok && hsFilter.ok && applyHs.ok && importersTab.ok && totalValue.ok && removeUnknownExporter.ok,
+      ok: resetCriteria.ok && dates.ok && hsFilter.ok && applyHs.ok && importersTab.ok && totalValue.ok && removeUnknownExporter.ok && verification.ok,
+      reason: stageFailureReason || (verification.ok ? "" : "Applied search criteria did not match the requested values."),
       criteria: {
         country: "Global",
         dataType: "Import-Global",
@@ -1526,7 +1617,61 @@
       applyResultsStable,
       importersTab,
       totalValue,
-      removeUnknownExporter
+      removeUnknownExporter,
+      verification
+    };
+  }
+
+  async function applyUserCriteria(options) {
+    const attempts = [];
+    let lastResult = null;
+
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      lastResult = await applyUserCriteriaOnce(options);
+      attempts.push({
+        attempt,
+        ok: Boolean(lastResult.ok),
+        reason: lastResult.reason || lastResult.totalValue?.reason || "",
+        verification: lastResult.verification
+      });
+
+      if (lastResult.ok) {
+        await humanPause(500, 900);
+        await postLocalGuiLog(
+          `[조건 검증 완료] HS ${options.hsCode} / USD ${formatPlainNumber(options.minValue)} ~ ${formatPlainNumber(options.maxValue)}`,
+          "조건 검증 완료"
+        );
+        return {
+          ...lastResult,
+          attempts
+        };
+      }
+
+      await postLocalGuiRawLog({
+        type: "criteria-verification-failed",
+        attempt,
+        options,
+        result: lastResult
+      });
+
+      if (attempt < 3) {
+        await postLocalGuiLog(
+          `[조건 재시도] 적용된 조건이 요청값과 달라 전체 초기화 후 다시 적용합니다 (${attempt}/3).`,
+          "조건 재시도"
+        );
+        await humanPause(1800, 3200);
+      }
+    }
+
+    await postLocalGuiLog(
+      "[조건 설정 중단] 검색 조건을 3회 확인했지만 요청값과 일치하지 않습니다.",
+      "조건 설정 실패"
+    );
+    return {
+      ...(lastResult || { ok: false }),
+      ok: false,
+      reason: lastResult?.reason || "Applied search criteria did not match after 3 attempts.",
+      attempts
     };
   }
 
@@ -1871,6 +2016,13 @@
         (Number.isFinite(range.min) && Number.isFinite(range.max) && expectedRowNumber >= range.min && expectedRowNumber <= range.max);
 
       if (candidates.length && current.signature && !pageLooksBusy() && reachedTargetPage && expectedRowVisible) {
+        const recovered = clearRecordNotFoundRecoveryIfTargetReached(candidates);
+        if (recovered) {
+          await postLocalGuiLog(
+            `바이어 목록 복구 완료: 목표 ${targetPage}페이지에서 ${candidates.length}개 확인`,
+            "복구 완료"
+          );
+        }
         return candidates;
       }
 
@@ -1926,7 +2078,7 @@
     const target = Math.max(1, Number.parseInt(targetPage, 10) || 1);
     const expectedRow = Number.parseInt(expectedRowNumber, 10);
     const attempts = [];
-    let recordNotFoundRecoveries = 0;
+    let recordNotFoundRecoveries = currentRecordNotFoundRecoveryAttempts();
 
     for (let attempt = 1; attempt <= 30; attempt += 1) {
       const stopped = await abortIfGuiStopRequested();
@@ -1952,11 +2104,11 @@
             snapshot: listPageSnapshot(),
             recovery: recordNotFoundRecoveries
           });
-          await postLocalGuiLog(
-            `바이어 목록이 비어 있어 새로고침 복구를 시도합니다 (${recordNotFoundRecoveries}/${MAX_RECORD_NOT_FOUND_RECOVERY}).`,
-            "복구 시도"
-          );
-          await recoverRecordNotFoundResults(1);
+          await recoverRecordNotFoundResults({
+            source: "go-to-page-current",
+            targetPage: target,
+            expectedRowNumber: Number.isFinite(expectedRow) ? expectedRow : null
+          });
           continue;
         }
         return {
@@ -1990,11 +2142,11 @@
             snapshot: listPageSnapshot(),
             recovery: recordNotFoundRecoveries
           });
-          await postLocalGuiLog(
-            `바이어 목록이 비어 있어 새로고침 복구를 시도합니다 (${recordNotFoundRecoveries}/${MAX_RECORD_NOT_FOUND_RECOVERY}).`,
-            "복구 시도"
-          );
-          await recoverRecordNotFoundResults(1);
+          await recoverRecordNotFoundResults({
+            source: "go-to-page-missing-control",
+            targetPage: target,
+            expectedRowNumber: Number.isFinite(expectedRow) ? expectedRow : null
+          });
           continue;
         }
 
@@ -2038,11 +2190,11 @@
         if (recordNotFoundRecoveries < MAX_RECORD_NOT_FOUND_RECOVERY) {
           recordNotFoundRecoveries += 1;
           attempts[attempts.length - 1].recovery = recordNotFoundRecoveries;
-          await postLocalGuiLog(
-            `바이어 목록이 비어 있어 새로고침 복구를 시도합니다 (${recordNotFoundRecoveries}/${MAX_RECORD_NOT_FOUND_RECOVERY}).`,
-            "복구 시도"
-          );
-          await recoverRecordNotFoundResults(1);
+          await recoverRecordNotFoundResults({
+            source: "go-to-page-after-click",
+            targetPage: target,
+            expectedRowNumber: Number.isFinite(expectedRow) ? expectedRow : null
+          });
           continue;
         }
 
@@ -2107,7 +2259,7 @@
   async function goNextImporterPage() {
     let before = listPageSnapshot();
     const attempts = [];
-    let recordNotFoundRecoveries = 0;
+    let recordNotFoundRecoveries = currentRecordNotFoundRecoveryAttempts();
 
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       const stopped = await abortIfGuiStopRequested();
@@ -2128,11 +2280,10 @@
 
         if (pageShowsRecordNotFound() && recordNotFoundRecoveries < MAX_RECORD_NOT_FOUND_RECOVERY) {
           recordNotFoundRecoveries += 1;
-          await postLocalGuiLog(
-            `바이어 목록이 비어 있어 새로고침 복구를 시도합니다 (${recordNotFoundRecoveries}/${MAX_RECORD_NOT_FOUND_RECOVERY}).`,
-            "복구 시도"
-          );
-          await recoverRecordNotFoundResults(1);
+          await recoverRecordNotFoundResults({
+            source: "next-page-missing-control",
+            targetPage: Number.isFinite(before.page) ? before.page + 1 : null
+          });
           continue;
         }
 
@@ -2174,6 +2325,13 @@
       });
 
       if (candidates?.length) {
+        const recovered = clearRecordNotFoundRecoveryIfTargetReached(candidates);
+        if (recovered) {
+          await postLocalGuiLog(
+            `바이어 목록 복구 완료: ${after.page || "-"}페이지에서 ${candidates.length}개 확인`,
+            "복구 완료"
+          );
+        }
         await waitForImporterResultsReady(15000);
         return {
           ok: true,
@@ -2196,11 +2354,10 @@
       if (recordNotFound && recordNotFoundRecoveries < MAX_RECORD_NOT_FOUND_RECOVERY) {
         recordNotFoundRecoveries += 1;
         attempts[attempts.length - 1].recovery = recordNotFoundRecoveries;
-        await postLocalGuiLog(
-          `바이어 목록이 비어 있어 새로고침 복구를 시도합니다 (${recordNotFoundRecoveries}/${MAX_RECORD_NOT_FOUND_RECOVERY}).`,
-          "복구 시도"
-        );
-        await recoverRecordNotFoundResults(1);
+        await recoverRecordNotFoundResults({
+          source: "next-page-after-click",
+          targetPage: Number.isFinite(before.page) ? before.page + 1 : null
+        });
         continue;
       }
 
@@ -2249,8 +2406,7 @@
     }
 
     if (recoverRecordNotFound && pageShowsRecordNotFound()) {
-      await postLocalGuiLog("바이어 목록이 비어 있어 페이지를 새로고침합니다.", "복구 시도");
-      const recovered = await recoverRecordNotFoundResults();
+      const recovered = await recoverRecordNotFoundResults({ source: "wait-for-importer-results" });
       if (recovered.length) {
         return recovered;
       }
@@ -2269,6 +2425,16 @@
       return null;
     }, timeoutMs, 500, 500);
 
+    if (candidates?.length) {
+      const recovered = clearRecordNotFoundRecoveryIfTargetReached(candidates);
+      if (recovered) {
+        await postLocalGuiLog(
+          `바이어 목록 복구 완료: ${currentPaginationPage() || "-"}페이지에서 ${candidates.length}개 확인`,
+          "복구 완료"
+        );
+      }
+    }
+
     return candidates || [];
   }
 
@@ -2281,30 +2447,115 @@
       text.includes("nodatafound");
   }
 
-  async function recoverRecordNotFoundResults(maxAttempts = 2) {
-    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-      if (await getLocalGuiStopRequested()) {
-        return [];
-      }
+  function readRecordNotFoundRecovery() {
+    try {
+      const raw = sessionStorage.getItem(RECORD_NOT_FOUND_RECOVERY_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch {
+      return null;
+    }
+  }
 
-      location.reload();
-      const returned = await waitForUrlPart("/search-results", 45000);
-      if (!returned) {
-        continue;
-      }
+  function currentRecordNotFoundRecoveryAttempts() {
+    const recovery = readRecordNotFoundRecovery();
+    const collectionState = readCollectionState();
+    const sameTask = recovery &&
+      String(recovery.queueTaskId || "") === String(collectionState?.queueTaskId || "");
+    return sameTask ? Number.parseInt(recovery.attempts, 10) || 0 : 0;
+  }
 
-      await sleep(2500);
-      await selectImportersTab();
-      await waitForResultsStable(20000);
+  function clearRecordNotFoundRecovery() {
+    sessionStorage.removeItem(RECORD_NOT_FOUND_RECOVERY_KEY);
+  }
 
-      const candidates = await waitForImporterCandidates(15000);
-      if (candidates.length) {
-        await postLocalGuiLog(`바이어 목록 복구 완료: ${candidates.length}개 확인`, "복구 완료");
-        return candidates;
-      }
+  function clearRecordNotFoundRecoveryIfTargetReached(candidates = getImporterCandidates()) {
+    const recovery = readRecordNotFoundRecovery();
+    if (!recovery) {
+      return null;
     }
 
-    return [];
+    const targetPage = Number.parseInt(recovery.targetPage, 10);
+    const expectedRowNumber = Number.parseInt(recovery.expectedRowNumber, 10);
+    const currentPage = currentPaginationPage();
+    const rowRange = candidateRowRange(candidates);
+    const pageMatches = !Number.isFinite(targetPage) || currentPage === targetPage;
+    const rowMatches = !Number.isFinite(expectedRowNumber) || (
+      Number.isFinite(rowRange.min) &&
+      Number.isFinite(rowRange.max) &&
+      expectedRowNumber >= rowRange.min &&
+      expectedRowNumber <= rowRange.max
+    );
+
+    if (!pageMatches || !rowMatches) {
+      return null;
+    }
+
+    clearRecordNotFoundRecovery();
+    return recovery;
+  }
+
+  async function recoverRecordNotFoundResults(context = {}) {
+    if (await getLocalGuiStopRequested()) {
+      return [];
+    }
+
+    const collectionState = readCollectionState();
+    const queueTaskId = String(collectionState?.queueTaskId || "");
+    const previous = readRecordNotFoundRecovery();
+    const sameTask = previous && String(previous.queueTaskId || "") === queueTaskId;
+    const previousAttempts = sameTask ? Number.parseInt(previous.attempts, 10) || 0 : 0;
+
+    if (previousAttempts >= MAX_RECORD_NOT_FOUND_RECOVERY) {
+      await postLocalGuiLog(
+        `바이어 목록을 ${MAX_RECORD_NOT_FOUND_RECOVERY}회 새로고침했지만 복구하지 못했습니다.`,
+        "복구 실패"
+      );
+      await postLocalGuiRawLog({
+        type: "record-not-found-recovery-exhausted",
+        recovery: previous,
+        context,
+        collectionState
+      });
+      return [];
+    }
+
+    const inferredTargetPage = importerPageForRow(collectionState?.resumeStartRowNumber || 1, 10);
+    const recovery = {
+      queueTaskId,
+      attempts: previousAttempts + 1,
+      maxAttempts: MAX_RECORD_NOT_FOUND_RECOVERY,
+      requestedAt: new Date().toISOString(),
+      url: location.href,
+      page: currentPaginationPage(),
+      targetPage: Number.parseInt(context.targetPage, 10) || inferredTargetPage,
+      expectedRowNumber: Number.parseInt(context.expectedRowNumber, 10) || collectionState?.resumeStartRowNumber || null,
+      rowRange: candidateRowRange(getImporterCandidates()),
+      resumeStartRowNumber: collectionState?.resumeStartRowNumber || null,
+      phase: collectionState?.phase || "results",
+      context
+    };
+    sessionStorage.setItem(RECORD_NOT_FOUND_RECOVERY_KEY, JSON.stringify(recovery));
+
+    if (collectionState) {
+      collectionState.summary = collectionState.summary || {};
+      collectionState.summary.diagnostics = {
+        ...(collectionState.summary.diagnostics || {}),
+        recordNotFoundRecovery: recovery
+      };
+      writeCollectionState(collectionState);
+    }
+
+    await postLocalGuiLog(
+      `바이어 목록이 비어 있어 새로고침 복구를 시도합니다 (${recovery.attempts}/${MAX_RECORD_NOT_FOUND_RECOVERY}).`,
+      "복구 시도"
+    );
+    await postLocalGuiRawLog({
+      type: "record-not-found-reload",
+      recovery
+    });
+
+    location.reload();
+    return new Promise(() => {});
   }
 
   function companyKeyFromElement(element) {
@@ -3646,9 +3897,11 @@
 
   function clearCollectionState() {
     sessionStorage.removeItem(COLLECTION_STATE_KEY);
+    clearRecordNotFoundRecovery();
   }
 
   function createCollectionState(hsCode, targetCount, options = {}) {
+    clearRecordNotFoundRecovery();
     const resultsUrl = location.href;
     const alreadySavedBuyers = options.alreadySavedBuyers || [];
     const resumeStartRowNumber = Math.max(1, Number.parseInt(options.resumeStartRowNumber, 10) || 1);

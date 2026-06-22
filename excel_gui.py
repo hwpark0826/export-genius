@@ -17,8 +17,8 @@ from fill_excel import fill_workbook, load_data, safe_filename
 
 
 APP_NAME = "Export Genius 자동 저장 도구"
-APP_VERSION = "0.3.50"
-EXPECTED_EXTENSION_VERSION = "0.3.50"
+APP_VERSION = "0.3.54"
+EXPECTED_EXTENSION_VERSION = "0.3.54"
 LOCAL_API_VERSION = 1
 
 
@@ -511,7 +511,9 @@ class ExcelGui:
         self.queue_active = False
         self.queue_run_id = ""
         self.queue_task_ids: dict[int, str] = {}
-        self.queue_lock = threading.Lock()
+        self.queue_lock = threading.RLock()
+        self.queue_completion_events: dict[str, threading.Event] = {}
+        self.queue_completion_results: dict[str, dict] = {}
         self.watch_thread: threading.Thread | None = None
         self.stop_event = threading.Event()
         self.local_server: ThreadingHTTPServer | None = None
@@ -708,7 +710,15 @@ class ExcelGui:
             }
 
     def local_queue_complete_payload(self, query: dict[str, list[str]]) -> dict:
+        requested_task_id = (query.get("taskId") or [""])[0]
+        completion_event: threading.Event | None = None
+        owns_completion = False
+
         with self.queue_lock:
+            cached = self.queue_completion_results.get(requested_task_id)
+            if cached:
+                return {**cached, "duplicate": True}
+
             if not self.queue_active or self.queue_position >= len(self.queue_indices):
                 return {"ok": False, "reason": "완료 처리할 자동 작업이 없습니다."}
 
@@ -718,7 +728,6 @@ class ExcelGui:
             target = int(row["target"])
             expected_task_id = self.queue_task_ids.get(row_index, "")
 
-            requested_task_id = (query.get("taskId") or [""])[0]
             if expected_task_id and requested_task_id != expected_task_id:
                 reason = "완료 보고가 현재 작업과 일치하지 않아 무시했습니다."
                 self.post_watch_message(
@@ -733,23 +742,88 @@ class ExcelGui:
                     "receivedTaskId": requested_task_id,
                 }
 
+            completion_event = self.queue_completion_events.get(requested_task_id)
+            if completion_event is None:
+                completion_event = threading.Event()
+                self.queue_completion_events[requested_task_id] = completion_event
+                owns_completion = True
+
+        if not owns_completion:
+            if not completion_event.wait(timeout=25):
+                return {
+                    "ok": False,
+                    "reason": "같은 작업의 완료 처리가 아직 끝나지 않았습니다.",
+                    "pending": True,
+                    "taskId": requested_task_id,
+                }
+
+            with self.queue_lock:
+                cached = self.queue_completion_results.get(requested_task_id)
+                if cached:
+                    return {**cached, "duplicate": True}
+            return {
+                "ok": False,
+                "reason": "완료 처리 결과를 확인하지 못했습니다.",
+                "taskId": requested_task_id,
+            }
+
         task_dir = task_output_dir(Path(self.output_dir_var.get()), task)
         deadline = time.time() + 20
-        saved_count = count_task_xlsx_files(Path(self.output_dir_var.get()), task)
-        while saved_count < target and time.time() < deadline:
-            time.sleep(0.5)
+        try:
             saved_count = count_task_xlsx_files(Path(self.output_dir_var.get()), task)
+            while saved_count < target and time.time() < deadline:
+                time.sleep(0.5)
+                saved_count = count_task_xlsx_files(Path(self.output_dir_var.get()), task)
+        except Exception as error:
+            result = {
+                "ok": False,
+                "reason": f"엑셀 파일 수를 확인하지 못했습니다: {error}",
+                "taskId": requested_task_id,
+            }
+            with self.queue_lock:
+                self.queue_completion_results[requested_task_id] = result
+                completion_event.set()
+            return result
 
         if saved_count < target:
             reason = f"엑셀 파일이 목표 수량보다 적습니다. 현재 {saved_count}/{target}개"
+            result = {"ok": False, "reason": reason, "savedCount": saved_count, "targetCount": target}
             with self.queue_lock:
-                self.task_rows[row_index]["status"] = "오류"
-                self.queue_active = False
+                current_matches = (
+                    self.queue_active
+                    and self.queue_position < len(self.queue_indices)
+                    and self.queue_indices[self.queue_position] == row_index
+                    and self.queue_task_ids.get(row_index, "") == requested_task_id
+                )
+                if current_matches:
+                    self.task_rows[row_index]["status"] = "오류"
+                    self.queue_active = False
+                    self.set_current_task_payload(None)
+                self.queue_completion_results[requested_task_id] = result
+                completion_event.set()
             self.root.after(0, self.refresh_task_tree)
             self.post_watch_message(f"자동 작업 중단: {task.company} / {task.hscode} - {reason}", f"오류: {reason}")
-            return {"ok": False, "reason": reason, "savedCount": saved_count, "targetCount": target}
+            return result
 
         with self.queue_lock:
+            current_matches = (
+                self.queue_active
+                and self.queue_position < len(self.queue_indices)
+                and self.queue_indices[self.queue_position] == row_index
+                and self.queue_task_ids.get(row_index, "") == requested_task_id
+            )
+            if not current_matches:
+                reason = "완료 확인 중 현재 작업이 변경되어 큐 이동을 취소했습니다."
+                result = {
+                    "ok": False,
+                    "stale": True,
+                    "reason": reason,
+                    "taskId": requested_task_id,
+                }
+                self.queue_completion_results[requested_task_id] = result
+                completion_event.set()
+                return result
+
             self.task_rows[row_index]["status"] = f"완료 {saved_count}/{target}"
             self.queue_position += 1
             done = self.queue_position >= len(self.queue_indices)
@@ -770,17 +844,19 @@ class ExcelGui:
                 )
 
             self.set_current_task_payload(next_payload)
+            result = {
+                "ok": True,
+                "done": done,
+                "savedCount": saved_count,
+                "targetCount": target,
+                "nextTask": next_payload,
+            }
+            self.queue_completion_results[requested_task_id] = result
+            completion_event.set()
 
         self.root.after(0, self.refresh_task_tree)
         self.post_watch_message(f"자동 작업 완료: {task.company} / {task.hscode} - 엑셀 {saved_count}개")
-
-        return {
-            "ok": True,
-            "done": done,
-            "savedCount": saved_count,
-            "targetCount": target,
-            "nextTask": next_payload,
-        }
+        return result
 
     def local_queue_fail_payload(self, query: dict[str, list[str]]) -> dict:
         reason = (query.get("reason") or [""])[0] or "확장프로그램 작업 실패"
@@ -1344,6 +1420,10 @@ class ExcelGui:
 
     def prepare_selected_queue(self) -> None:
         try:
+            with self.queue_lock:
+                if self.queue_active:
+                    raise RuntimeError("이미 준비되었거나 실행 중인 자동 작업이 있습니다. 먼저 작업을 중단하거나 완료하세요.")
+
             if not self.task_rows:
                 self.rebuild_task_rows(self.load_tasks())
 
@@ -1384,6 +1464,8 @@ class ExcelGui:
                     row_index: f"{self.queue_run_id}:{position + 1}:{row_index + 1}"
                     for position, row_index in enumerate(self.queue_indices)
                 }
+                self.queue_completion_events = {}
+                self.queue_completion_results = {}
                 first_index = self.queue_indices[0]
                 first_row = self.task_rows[first_index]
                 self.set_current_task_payload(
