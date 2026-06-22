@@ -24,7 +24,7 @@ Python GUI가 로컬 서버를 실행하고, Edge 확장프로그램이 Export G
 - `extension/popup.html`, `extension/popup.css`: 최소화된 확장프로그램 팝업 UI
 - `requirements.txt`: Python 의존성
 
-## 실행 준비
+## 개발 환경 실행 준비
 
 1. Python 패키지를 설치합니다.
 
@@ -39,6 +39,8 @@ pip install -r requirements.txt
 - `압축 해제된 확장 로드`
 - `extension` 폴더 선택
 
+이 절차는 소스코드를 직접 실행하는 개발 환경용입니다. 향후 배포본은 Python 설치와 Edge 개발자 모드 없이 사용할 수 있도록 Windows 설치 프로그램과 관리형 확장프로그램으로 제공하는 것을 전제로 합니다.
+
 3. GUI를 실행합니다.
 
 ```powershell
@@ -50,6 +52,8 @@ GUI 실행 시 로컬 서버가 함께 시작됩니다.
 ```text
 http://127.0.0.1:8765
 ```
+
+사용자가 선택한 경로와 기본 목표값은 `%APPDATA%\ExportGenius\settings.json`에 저장되며, 실행 로그는 `%LOCALAPPDATA%\ExportGenius\logs`에 기록됩니다.
 
 ## 기본 사용 흐름
 

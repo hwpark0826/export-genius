@@ -1,9 +1,17 @@
 (() => {
-  const HELPER_VERSION = "v2026-06-18-queue-task-id-guard";
+  const HELPER_VERSION = "v2026-06-22-human-paced-actions";
+  const EXTENSION_VERSION = chrome.runtime?.getManifest?.().version || "";
+  const LOCAL_API_VERSION = 1;
   const USE_SAVED_BUYER_SKIP_RESUME = false;
   const COLLECTION_STATE_KEY = "exportGeniusQualifiedCollectionState";
   const LOCAL_GUI_URL = "http://127.0.0.1:8765";
   const MAX_RECORD_NOT_FOUND_RECOVERY = 3;
+  const HUMAN_DELAY_RANGES = Object.freeze({
+    input: [220, 520],
+    control: [450, 950],
+    navigation: [700, 1400],
+    task: [1200, 2200]
+  });
 
   function textOf(element) {
     if (!element) {
@@ -15,6 +23,15 @@
 
   function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  async function humanPause(kindOrMin = "control", explicitMax = null) {
+    const [minMs, maxMs] = Number.isFinite(kindOrMin)
+      ? [kindOrMin, Number.isFinite(explicitMax) ? Math.max(kindOrMin, explicitMax) : kindOrMin]
+      : (HUMAN_DELAY_RANGES[kindOrMin] || HUMAN_DELAY_RANGES.control);
+    const duration = Math.floor(minMs + Math.random() * (maxMs - minMs + 1));
+    await sleep(duration);
+    return duration;
   }
 
   async function waitUntil(predicate, timeoutMs = 20000, intervalMs = 300, settleMs = 0) {
@@ -266,9 +283,9 @@
     input.scrollIntoView({ block: "center", inline: "center" });
     input.focus();
     clickAt(input, 0.5);
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await humanPause(200, 500);
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", code: "ArrowDown", bubbles: true }));
-    await new Promise((resolve) => setTimeout(resolve, 700));
+    await humanPause(700, 1200);
 
     let option = findOptionNearInput(input, optionTexts);
     let usedSearch = false;
@@ -276,7 +293,7 @@
     if (!option && searchText) {
       dispatchValue(input, searchText);
       usedSearch = true;
-      await new Promise((resolve) => setTimeout(resolve, 700));
+      await humanPause(700, 1200);
       option = findOptionNearInput(input, optionTexts);
     }
 
@@ -289,10 +306,11 @@
       };
     }
 
+    await humanPause("control");
     clickElement(option);
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true }));
     closeOpenMenus();
-    await new Promise((resolve) => setTimeout(resolve, 400));
+    await humanPause(400, 800);
 
     return {
       ok: true,
@@ -407,10 +425,10 @@
 
     trigger.scrollIntoView({ block: "center", inline: "center" });
     closeOpenMenus();
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await humanPause(200, 500);
 
     clickElement(trigger);
-    await new Promise((resolve) => setTimeout(resolve, 700));
+    await humanPause(700, 1200);
 
     const option = findOptionNearTrigger(trigger, optionTexts);
 
@@ -439,9 +457,10 @@
       };
     }
 
+    await humanPause("control");
     clickElement(option);
     closeOpenMenus();
-    await new Promise((resolve) => setTimeout(resolve, 400));
+    await humanPause(400, 800);
 
     return {
       ok: true,
@@ -506,7 +525,7 @@
       searchInput.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", code: "ArrowDown", bubbles: true }));
     }
 
-    await sleep(500);
+    await humanPause(500, 900);
   }
 
   async function chooseAntdTopFilterSelect(kind, optionTexts) {
@@ -523,7 +542,7 @@
     const searchInput = container.querySelector("input[role='combobox']");
 
     closeOpenMenus();
-    await new Promise((resolve) => setTimeout(resolve, 150));
+    await humanPause(150, 400);
     await openAntdSelect(selector, searchInput);
 
     let option = findAntdOption(optionTexts);
@@ -531,17 +550,17 @@
 
     if (!option && searchInput) {
       dispatchValue(searchInput, "");
-      await sleep(200);
+      await humanPause(200, 500);
       dispatchValue(searchInput, optionTexts[0]);
       searchInput.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", code: "ArrowDown", bubbles: true }));
       usedSearch = true;
-      await new Promise((resolve) => setTimeout(resolve, 700));
+      await humanPause(700, 1200);
       option = findAntdOption(optionTexts);
     }
 
     if (!option) {
       closeOpenMenus();
-      await sleep(250);
+      await humanPause(250, 550);
       await openAntdSelect(selector, searchInput);
       option = findAntdOption(optionTexts);
     }
@@ -561,9 +580,10 @@
       };
     }
 
+    await humanPause("control");
     clickElement(option);
     closeOpenMenus();
-    await new Promise((resolve) => setTimeout(resolve, 400));
+    await humanPause(400, 800);
 
     return {
       ok: true,
@@ -788,6 +808,85 @@
     };
   }
 
+  function appliedFilterCount() {
+    const counts = Array.from(document.querySelectorAll("div, span, p, strong"))
+      .filter((element) => !isHelperElement(element) && !isResultsTableElement(element))
+      .map((element) => normalizeText(textOf(element)).match(/^(\d+)filters?(?:clearall)?$/))
+      .filter(Boolean)
+      .map((match) => Number.parseInt(match[1], 10))
+      .filter(Number.isFinite);
+
+    return counts.length ? Math.max(...counts) : null;
+  }
+
+  function findClearAllCriteriaControl() {
+    const candidates = Array.from(document.querySelectorAll("button, a, [role='button'], span, p, div"))
+      .filter((element) => {
+        if (!visibleElement(element) || isResultsTableElement(element)) {
+          return false;
+        }
+
+        return normalizeText(textOf(element)) === "clearall";
+      })
+      .map((element) => element.closest("button, a, [role='button']") || element)
+      .filter((element, index, items) => items.indexOf(element) === index);
+
+    return candidates.sort((a, b) => {
+      const aClickable = a.matches("button, a, [role='button']") ? 1 : 0;
+      const bClickable = b.matches("button, a, [role='button']") ? 1 : 0;
+      return bClickable - aClickable;
+    })[0] || null;
+  }
+
+  async function clearAllAppliedCriteria() {
+    closeOpenMenus();
+    document.body.click();
+    await humanPause(350, 700);
+
+    const beforeCount = appliedFilterCount();
+    const control = findClearAllCriteriaControl();
+
+    if (!control) {
+      return beforeCount && beforeCount > 0
+        ? {
+            ok: false,
+            reason: `Clear All control not found while ${beforeCount} filters are applied.`,
+            beforeCount
+          }
+        : {
+            ok: true,
+            alreadyClear: true,
+            beforeCount: beforeCount || 0
+          };
+    }
+
+    const clicked = describeElement(control);
+    await humanPause("control");
+    clickElement(control);
+
+    const cleared = await waitUntil(() => {
+      const count = appliedFilterCount();
+      const remainingControl = findClearAllCriteriaControl();
+      return count === 0 || (count === null && !remainingControl)
+        ? {
+            count: count || 0,
+            clearAllVisible: Boolean(remainingControl)
+          }
+        : null;
+    }, 12000, 350, 500);
+
+    return {
+      ok: Boolean(cleared),
+      reason: cleared ? "" : "Applied filters did not clear after clicking Clear All.",
+      beforeCount,
+      clicked,
+      after: cleared || {
+        count: appliedFilterCount(),
+        clearAllVisible: Boolean(findClearAllCriteriaControl())
+      }
+    };
+  }
+
   function formatDate(date) {
     const year = date.getFullYear();
     const month = String(date.getMonth() + 1).padStart(2, "0");
@@ -814,7 +913,7 @@
     };
   }
 
-  function setLastOneYearDates() {
+  async function setLastOneYearDates() {
     const startInput = document.querySelector("input[placeholder='Start date']");
     const endInput = document.querySelector("input[placeholder='End date']");
     const range = getLastOneYearRange();
@@ -828,7 +927,9 @@
     }
 
     dispatchValue(startInput, range.start);
+    await humanPause("input");
     dispatchValue(endInput, range.end);
+    await humanPause("input");
 
     return {
       ok: true,
@@ -846,12 +947,12 @@
 
     closeOpenMenus();
     document.body.click();
-    await new Promise((resolve) => setTimeout(resolve, 2000));
+    await humanPause(2000, 3000);
 
     const filterResult = await chooseTopFilterSelect("filter", ["hs code", "hscode"]);
-    await new Promise((resolve) => setTimeout(resolve, 2000));
+    await humanPause(2000, 3000);
     const conditionResult = await chooseTopFilterSelect("condition", ["begin with"]);
-    await new Promise((resolve) => setTimeout(resolve, 2000));
+    await humanPause(2000, 3000);
     const detailInput = document.getElementById("enter-detail-input") ||
       Array.from(document.querySelectorAll("input")).find((element) => element.placeholder === "Enter details");
 
@@ -865,10 +966,11 @@
     }
 
     dispatchValue(detailInput, hsCode);
-    await sleep(700);
+    await humanPause(700, 1200);
 
+    await humanPause("control");
     const filterButton = clickExactControl("Filter", "button, [role='button']");
-    await sleep(700);
+    await humanPause(700, 1200);
 
     return {
       ok: filterResult.ok && conditionResult.ok && filterButton.ok,
@@ -979,8 +1081,9 @@
 
     let inputs = findInputs();
     if (header && inputs.length < 2) {
+      await humanPause("control");
       clickElement(header);
-      await sleep(700);
+      await humanPause(700, 1200);
       inputs = findInputs();
     }
 
@@ -996,8 +1099,9 @@
     }
 
     dispatchValue(inputs[0], minValue);
+    await humanPause("input");
     dispatchValue(inputs[1], maxValue);
-    await sleep(250);
+    await humanPause(250, 550);
 
     const addButton = Array.from(item.querySelectorAll("button, [role='button']"))
       .filter((element) => visibleElement(element) && normalizeText(textOf(element)) === "add")
@@ -1015,6 +1119,7 @@
       };
     }
 
+    await humanPause("control");
     clickElement(addButton);
     const resultsStable = await waitForResultsStable(12000);
 
@@ -1050,8 +1155,9 @@
 
     const modify = findVisibleByText(["modify your data"]);
     if (modify) {
+      await humanPause("control");
       clickElement(modify);
-      await sleep(700);
+      await humanPause(700, 1200);
     }
 
     const panel = findTotalValueFilterPanel();
@@ -1070,7 +1176,7 @@
     }
 
     label.scrollIntoView({ block: "center", inline: "nearest" });
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await humanPause(300, 650);
 
     const collapseResult = await applyTotalValueRangeFromCollapse(label, minValue, maxValue);
     if (collapseResult) {
@@ -1124,8 +1230,9 @@
       };
     }
 
+    await humanPause("control");
     clickElement(plus);
-    await new Promise((resolve) => setTimeout(resolve, 800));
+    await humanPause(800, 1400);
 
     const findTotalValueInputs = () => {
       const expandedRect = row.getBoundingClientRect();
@@ -1169,8 +1276,9 @@
     }
 
     dispatchValue(inputs[0], minValue);
+    await humanPause("input");
     dispatchValue(inputs[1], maxValue);
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await humanPause(300, 650);
 
     const addButton = Array.from(document.querySelectorAll("button, [role='button']"))
       .filter((element) => {
@@ -1190,6 +1298,7 @@
       };
     }
 
+    await humanPause("control");
     clickElement(addButton);
     const resultsStable = await waitForResultsStable(12000);
 
@@ -1238,11 +1347,12 @@
       const switchLabel = directCheckbox.closest("label") || filler;
       const slider = switchLabel.querySelector(".slider") || switchLabel;
       switchLabel.scrollIntoView({ block: "center", inline: "nearest" });
-      await new Promise((resolve) => setTimeout(resolve, 200));
+      await humanPause(200, 500);
 
       if (!directCheckbox.checked) {
+        await humanPause("control");
         clickElement(slider);
-        await new Promise((resolve) => setTimeout(resolve, 200));
+        await humanPause(200, 500);
       }
 
       if (!directCheckbox.checked) {
@@ -1271,8 +1381,9 @@
 
     const modify = findVisibleByText(["modify your data"]);
     if (modify) {
+      await humanPause("control");
       clickElement(modify);
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      await humanPause(500, 900);
     }
 
     const label = findVisibleByText(["remove unknown exporter", "unknown exporter"]);
@@ -1284,7 +1395,7 @@
     }
 
     label.scrollIntoView({ block: "center", inline: "nearest" });
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await humanPause(300, 650);
 
     const labelRect = label.getBoundingClientRect();
     const checkbox = Array.from(document.querySelectorAll("input[type='checkbox'], input[type='radio'], [role='checkbox'], [role='switch']"))
@@ -1302,6 +1413,7 @@
     if (checkbox) {
       const alreadyChecked = checkbox.checked || checkbox.getAttribute("aria-checked") === "true";
       if (!alreadyChecked) {
+        await humanPause("control");
         clickElement(checkbox);
       }
 
@@ -1320,6 +1432,7 @@
     ) || label.closest("label, .radio-filler, .ant-switch, [role='switch']");
 
     if (switchTarget) {
+      await humanPause("control");
       clickElement(switchTarget);
 
       const resultsStable = await waitForResultsStable(12000);
@@ -1331,6 +1444,7 @@
       };
     }
 
+    await humanPause("control");
     clickElement(label);
     const resultsStable = await waitForResultsStable(12000);
 
@@ -1357,26 +1471,42 @@
     const minValue = String(options.minValue || "50000").trim();
     const maxValue = String(options.maxValue || "5000000").trim();
 
-    const dates = setLastOneYearDates();
-    await sleep(700);
+    await postLocalGuiLog("[조건 초기화] 기존 검색 조건을 모두 제거합니다.", "조건 초기화");
+    const resetCriteria = await clearAllAppliedCriteria();
+    if (!resetCriteria.ok) {
+      await postLocalGuiLog("[조건 초기화 실패] 기존 검색 조건을 제거하지 못했습니다.", "조건 초기화 실패");
+      return {
+        ok: false,
+        reason: resetCriteria.reason,
+        resetCriteria
+      };
+    }
+    await postLocalGuiLog("[조건 초기화 완료] 새 검색 조건을 적용합니다.", "조건 초기화 완료");
+    await postLocalGuiLog(
+      `[조건 설정] HS ${hsCode} / USD ${formatPlainNumber(minValue)} ~ ${formatPlainNumber(maxValue)}`,
+      "조건 설정"
+    );
+
+    const dates = await setLastOneYearDates();
+    await humanPause(700, 1200);
     const hsFilter = await applyHsCodeFilter(hsCode);
-    await sleep(700);
+    await humanPause(700, 1200);
     const applyHs = clickExactControl("Apply", "button, [role='button']");
     const applyResultsStable = applyHs.ok ? await waitForResultsStable(12000) : { ok: false, reason: "Apply button not clicked" };
 
     const importersTab = await selectImportersTab();
-    await sleep(700);
+    await humanPause(700, 1200);
     let totalValue = await applyTotalValueRange(minValue, maxValue);
     if (!totalValue.ok) {
-      await sleep(1200);
+      await humanPause(1200, 1800);
       totalValue = await applyTotalValueRange(minValue, maxValue);
     }
-    await sleep(700);
+    await humanPause(700, 1200);
     const removeUnknownExporter = await enableRemoveUnknownExporter();
     await waitForImporterCandidates(8000);
 
     return {
-      ok: dates.ok && hsFilter.ok && applyHs.ok && importersTab.ok && totalValue.ok && removeUnknownExporter.ok,
+      ok: resetCriteria.ok && dates.ok && hsFilter.ok && applyHs.ok && importersTab.ok && totalValue.ok && removeUnknownExporter.ok,
       criteria: {
         country: "Global",
         dataType: "Import-Global",
@@ -1389,6 +1519,7 @@
         },
         removeUnknownExporter: true
       },
+      resetCriteria,
       dates,
       hsFilter,
       applyHs,
@@ -1488,6 +1619,7 @@
   }
 
   async function goBackToResults(resultsUrl) {
+    await humanPause(500, 900);
     history.back();
     let ok = await waitForUrlPart("/search-results", 30000);
 
@@ -1882,6 +2014,7 @@
         };
       }
 
+      await humanPause("control");
       clickElement(control);
       await waitForPaginationChange(before, 30000);
       const stoppedAfterClick = await abortIfGuiStopRequested();
@@ -2013,6 +2146,7 @@
       }
 
       const clicked = describePaginationCandidate(next);
+      await humanPause("control");
       clickElement(next);
 
       const candidates = await waitUntil(() => {
@@ -2285,6 +2419,7 @@
       };
     }
 
+    await humanPause("navigation");
     openElementInSameTab(identity.candidate);
     const opened = await waitForUrlPart("/company-profile", 30000);
 
@@ -2761,6 +2896,7 @@
       };
     }
 
+    await humanPause("navigation");
     clickElement(commodities);
     await waitUntil(() => {
       return findExactControl("Import Commodities", "button, a, [role='button']") ||
@@ -2769,8 +2905,9 @@
 
     const importCommodities = findExactControl("Import Commodities", "button, a, [role='button']");
     if (importCommodities) {
+      await humanPause("control");
       clickElement(importCommodities);
-      await sleep(900);
+      await humanPause(900, 1500);
     }
 
     return {
@@ -2802,10 +2939,14 @@
       }, attempt === 1 ? 15000 : 22000, 600, 1000);
 
       const bodyText = textOf(document.body);
+      const importRows = parseCommodityRowsFromText(bodyText, "import");
+      const availableHsCodes = Array.from(new Set(importRows.map((row) => row.hsCode)));
       attempts.push({
         attempt,
         parsed: Boolean(parsed),
         hasHsCodeText: bodyText.includes(code),
+        importRowCount: importRows.length,
+        availableHsCodes,
         bodyTextSample: bodyText.slice(0, 500)
       });
 
@@ -2821,11 +2962,27 @@
         };
       }
 
+      if (importRows.length > 0 && !availableHsCodes.includes(code)) {
+        return {
+          ok: true,
+          hsCode: code,
+          importValueUsdText: "",
+          importValuePercent: null,
+          threshold: 5,
+          qualified: false,
+          missingHsCode: true,
+          reason: `HS code ${code} was not found in Import Commodities.`,
+          availableHsCodes,
+          attempts
+        };
+      }
+
       await sleep(1200 * attempt);
       const overview = findExactControl("Overview", "a, button, [role='button']");
       if (overview) {
+        await humanPause("control");
         clickElement(overview);
-        await sleep(800);
+        await humanPause(800, 1400);
       }
     }
 
@@ -3011,8 +3168,9 @@
       };
     }
 
+    await humanPause("navigation");
     clickElement(overview);
-    await new Promise((resolve) => setTimeout(resolve, 1200));
+    await humanPause(1200, 1800);
 
     return extractOverviewProfile();
   }
@@ -3065,13 +3223,15 @@
       };
     }
 
+    await humanPause("navigation");
     clickElement(countries);
-    await new Promise((resolve) => setTimeout(resolve, 1200));
+    await humanPause(1200, 1800);
 
     const importCountriesButton = findExactControl("Import Countries", "button, a, [role='button']");
     if (importCountriesButton) {
+      await humanPause("control");
       clickElement(importCountriesButton);
-      await new Promise((resolve) => setTimeout(resolve, 800));
+      await humanPause(800, 1400);
     }
 
     const importRows = parseCountryRowsFromText(textOf(document.body), "import");
@@ -3083,8 +3243,9 @@
       const exportCountriesButton = findExactControl("Export Countries", "button, a, [role='button']");
 
       if (exportCountriesButton) {
+        await humanPause("control");
         clickElement(exportCountriesButton);
-        await new Promise((resolve) => setTimeout(resolve, 900));
+        await humanPause(900, 1500);
         exportRows = parseCountryRowsFromText(textOf(document.body), "export");
       } else {
         exportReason = "Export Countries tab not found";
@@ -3165,13 +3326,15 @@
       };
     }
 
+    await humanPause("navigation");
     clickElement(commodities);
-    await new Promise((resolve) => setTimeout(resolve, 1200));
+    await humanPause(1200, 1800);
 
     const importButton = findExactControl("Import Commodities", "button, a, [role='button']");
     if (importButton) {
+      await humanPause("control");
       clickElement(importButton);
-      await new Promise((resolve) => setTimeout(resolve, 800));
+      await humanPause(800, 1400);
     }
 
     const importRows = parseCommodityRowsFromText(textOf(document.body), "import");
@@ -3183,8 +3346,9 @@
       const exportButton = findExactControl("Export Commodities", "button, a, [role='button']");
 
       if (exportButton) {
+        await humanPause("control");
         clickElement(exportButton);
-        await new Promise((resolve) => setTimeout(resolve, 900));
+        await humanPause(900, 1500);
         exportRows = parseCommodityRowsFromText(textOf(document.body), "export");
       } else {
         exportReason = "Export Commodities tab not found";
@@ -3315,6 +3479,21 @@
       return stoppedAfterCommodity;
     }
 
+    if (commodityValue.ok && commodityValue.missingHsCode) {
+      await postLocalGuiLog(
+        `[조건 확인] Import Commodities에 HS ${code}가 없습니다. 다음 바이어로 넘어갑니다.`,
+        "HS코드 없음"
+      );
+      return {
+        ok: false,
+        skipped: true,
+        downloaded: false,
+        reason: commodityValue.reason,
+        hsCode: code,
+        commodityValue
+      };
+    }
+
     if (commodityValue.ok && commodityValue.qualified === false) {
       await postLocalGuiLog(
         `[조건 확인] HS ${code} 비중 ${formatPercent(commodityValue.importValuePercent)} - 기준 미달`,
@@ -3406,6 +3585,7 @@
 
     if (data.ok) {
       const expectedFileName = `${safeFileName(companyName)}.json`;
+      await humanPause("control");
       const downloadResult = downloadJson(data, expectedFileName);
       data.download = downloadResult;
       data.downloadFileName = downloadResult.filename || expectedFileName;
@@ -3419,6 +3599,7 @@
         };
       }
 
+      await humanPause("input");
       const confirmed = await confirmLocalJsonDownload(expectedFileName, companyName, code);
       data.downloadConfirmation = confirmed;
 
@@ -3741,13 +3922,13 @@
 
     closeOpenMenus();
     document.body.click();
-    await sleep(500);
+    await humanPause(500, 900);
 
     let candidates = await waitForImporterResultsReady(25000);
     if (!candidates.length) {
       const tabResult = await selectImportersTab();
       closeOpenMenus();
-      await sleep(800);
+      await humanPause(800, 1400);
       candidates = await waitForImporterResultsReady(25000);
 
       if (!candidates.length) {
@@ -3880,6 +4061,7 @@
     state.phase = "profile";
     writeCollectionState(state);
 
+    await humanPause("navigation");
     const openedBy = openElementInSameTab(target);
     const opened = await waitForUrlPart("/company-profile", 30000);
     if (opened) {
@@ -3981,14 +4163,15 @@
       return { ok: false, reason: `trigger not found: ${triggerText}` };
     }
 
+    await humanPause("control");
     clickAt(trigger, 0.88);
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    await humanPause(500, 900);
 
     const searchInput = findDropdownInputNear(trigger);
 
     if (searchInput && searchText) {
       dispatchValue(searchInput, searchText);
-      await new Promise((resolve) => setTimeout(resolve, 700));
+      await humanPause(700, 1200);
     }
 
     const option = findStrictOption(optionTexts) || findVisibleByText(optionTexts, { exact: true });
@@ -4002,10 +4185,11 @@
       };
     }
 
+    await humanPause("control");
     clickElement(option);
     const selected = await waitForTriggerText(trigger, optionTexts);
     closeOpenMenus();
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    await humanPause(500, 900);
 
     return {
       ok: true,
@@ -4040,7 +4224,7 @@
     );
 
     closeOpenMenus();
-    await new Promise((resolve) => setTimeout(resolve, 1000));
+    await humanPause(1000, 1600);
 
     const dataTypeResult = await chooseFromDropdown(
       "select data type",
@@ -4051,12 +4235,13 @@
     let searchResult = { ok: false, reason: "skipped because selection failed" };
 
     if (countryResult.ok && dataTypeResult.ok) {
-      await new Promise((resolve) => setTimeout(resolve, 800));
+      await humanPause(800, 1400);
       const searchButton = await waitForSearchButton();
 
       if (searchButton) {
+        await humanPause("control");
         clickElement(searchButton);
-        await new Promise((resolve) => setTimeout(resolve, 1500));
+        await humanPause(1500, 2300);
         searchResult = {
           ok: true,
           button: describeElement(searchButton),
@@ -4133,6 +4318,39 @@
 
   async function checkLocalGui() {
     return fetchLocalGui("/health");
+  }
+
+  async function checkLocalGuiCompatibility() {
+    const health = await checkLocalGui();
+    if (!health.ok) {
+      return {
+        ok: false,
+        reason: health.data?.reason || health.reason || "GUI local server is not available.",
+        health
+      };
+    }
+
+    const expectedExtensionVersion = String(health.data?.expectedExtensionVersion || "").trim();
+    const apiVersion = Number(health.data?.apiVersion || 0);
+    if (expectedExtensionVersion && expectedExtensionVersion !== EXTENSION_VERSION) {
+      return {
+        ok: false,
+        reason: `Extension version mismatch. Expected ${expectedExtensionVersion}, current ${EXTENSION_VERSION || "unknown"}.`,
+        health
+      };
+    }
+    if (apiVersion && apiVersion !== LOCAL_API_VERSION) {
+      return {
+        ok: false,
+        reason: `Local API version mismatch. Expected ${LOCAL_API_VERSION}, current ${apiVersion}.`,
+        health
+      };
+    }
+
+    return {
+      ok: true,
+      health
+    };
   }
 
   async function getLocalGuiTask() {
@@ -4218,6 +4436,7 @@
 
     if (collection.ok && report.ok && report.data && report.data.done === false) {
       await postLocalGuiLog("다음 작업을 이어서 시작합니다.", "Running task");
+      await humanPause("task");
       output.nextRun = await startLocalGuiQueueAutomation();
     }
 
@@ -4289,17 +4508,18 @@
   }
 
   async function applyLocalGuiTaskCriteria() {
+    const compatibility = await checkLocalGuiCompatibility();
+    if (!compatibility.ok) {
+      await postLocalGuiLog(`[연결 오류] ${compatibility.reason}`, "연결 오류");
+      return compatibility;
+    }
+
     const loaded = await loadLocalGuiTaskIntoPanel();
     const task = loaded.task;
 
     if (!loaded.ok || !task) {
       return loaded;
     }
-
-    await postLocalGuiLog(
-      `[조건 설정] HS ${task.hsCode} / USD ${formatPlainNumber(task.minValue)} ~ ${formatPlainNumber(task.maxValue)}`,
-      "조건 설정"
-    );
 
     const criteria = await applyUserCriteria({
       hsCode: task.hsCode,
@@ -4471,6 +4691,7 @@
       await postLocalGuiLog(
         `목표: ${task.targetCount}개 | 기존 저장: ${task.alreadySaved || 0}개 | 추가 수집: ${task.remainingCount || task.targetCount}개`
       );
+      await humanPause("task");
       const run = await startLocalGuiTaskAutomation();
       results.push({
         queuePosition: current.data?.queuePosition,
@@ -4541,6 +4762,7 @@
 
       await postLocalGuiBlankLine();
       await postLocalGuiLog("다음 작업을 준비합니다.", "작업 준비");
+      await humanPause("task");
     }
 
     await failLocalGuiQueueTask("Queue guard limit reached.", activeTask);
@@ -4554,6 +4776,23 @@
 
   let localGuiCommandRunning = false;
   let localExtensionStopRequested = false;
+  let extensionReadyReported = false;
+
+  async function reportExtensionReady() {
+    if (extensionReadyReported) {
+      return true;
+    }
+
+    const result = await postLocalGuiRawLog({
+      type: "extension-ready",
+      version: HELPER_VERSION,
+      extensionVersion: EXTENSION_VERSION,
+      localApiVersion: LOCAL_API_VERSION,
+      url: location.href
+    });
+    extensionReadyReported = Boolean(result.ok);
+    return extensionReadyReported;
+  }
 
   async function handleLocalGuiCommand(command) {
     if (!command?.action) {
@@ -4610,8 +4849,13 @@
   }
 
   async function pollLocalGuiCommands() {
+    await reportExtensionReady();
+
     if (localGuiCommandRunning) {
       const runningResult = await getLocalGuiCommand();
+      if (!runningResult.ok) {
+        extensionReadyReported = false;
+      }
       const runningCommand = runningResult.data?.command;
       if (runningResult.ok && runningCommand?.action === "stop") {
         await handleLocalGuiCommand(runningCommand);
@@ -4624,6 +4868,9 @@
     }
 
     const result = await getLocalGuiCommand();
+    if (!result.ok) {
+      extensionReadyReported = false;
+    }
     const command = result.data?.command;
     if (result.ok && command) {
       await handleLocalGuiCommand(command);
@@ -4657,11 +4904,7 @@
   };
 
   setTimeout(async () => {
-    await postLocalGuiRawLog({
-      type: "extension-ready",
-      version: HELPER_VERSION,
-      url: location.href
-    });
+    await reportExtensionReady();
     await pollLocalGuiCommands();
   }, 500);
   setTimeout(autoResumeQualifiedCollection, 1200);

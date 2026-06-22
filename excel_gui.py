@@ -1,8 +1,10 @@
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
 from pathlib import Path
 import shutil
+import sys
 import threading
 import time
 import tkinter as tk
@@ -14,12 +16,63 @@ from openpyxl import load_workbook
 from fill_excel import fill_workbook, load_data, safe_filename
 
 
-APP_VERSION = "0.3.0"
+APP_NAME = "Export Genius 자동 저장 도구"
+APP_VERSION = "0.3.50"
+EXPECTED_EXTENSION_VERSION = "0.3.50"
+LOCAL_API_VERSION = 1
+
+
+def resource_dir() -> Path:
+    bundled = getattr(sys, "_MEIPASS", None)
+    if bundled:
+        return Path(bundled)
+    return Path(__file__).resolve().parent
+
+
+RESOURCE_DIR = resource_dir()
+IS_FROZEN = bool(getattr(sys, "frozen", False))
+ROAMING_APP_DIR = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming")) / "ExportGenius"
+LOCAL_APP_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "ExportGenius"
+SETTINGS_PATH = ROAMING_APP_DIR / "settings.json"
+LOG_DIR = LOCAL_APP_DIR / "logs"
+APP_LOG_PATH = LOG_DIR / "app.log"
+RAW_LOG_PATH = LOG_DIR / "extension-raw.jsonl"
 DEFAULT_DOWNLOADS = Path.home() / "Downloads"
-DEFAULT_TEMPLATE = Path(r"C:\Users\user\Desktop\export genius\template.xlsx")
-DEFAULT_OUTPUT_DIR = Path(r"C:\Users\user\Desktop\export genius\output")
+DEFAULT_TEMPLATE = RESOURCE_DIR / "template.xlsx"
+DEFAULT_OUTPUT_DIR = (
+    Path.home() / "Documents" / "Export Genius Output"
+    if IS_FROZEN
+    else RESOURCE_DIR / "output"
+)
 LOCAL_SERVER_HOST = "127.0.0.1"
 LOCAL_SERVER_PORT = 8765
+
+
+def load_user_settings() -> dict:
+    try:
+        data = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_user_settings(settings: dict) -> None:
+    ROAMING_APP_DIR.mkdir(parents=True, exist_ok=True)
+    temporary_path = SETTINGS_PATH.with_suffix(".tmp")
+    temporary_path.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary_path.replace(SETTINGS_PATH)
+
+
+def rotate_log_file(path: Path, max_bytes: int = 5 * 1024 * 1024) -> None:
+    try:
+        if not path.exists() or path.stat().st_size < max_bytes:
+            return
+        backup = path.with_suffix(path.suffix + ".1")
+        if backup.exists():
+            backup.unlink()
+        path.replace(backup)
+    except OSError:
+        return
 
 
 @dataclass(frozen=True)
@@ -427,21 +480,29 @@ class LocalApiHandler(BaseHTTPRequestHandler):
 class ExcelGui:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.root.title(f"Export Genius 자동 저장 도구 {APP_VERSION}")
+        self.root.title(f"{APP_NAME} {APP_VERSION}")
         self.root.geometry("980x620")
         self.root.minsize(860, 520)
 
+        self.settings = load_user_settings()
         default_input = latest_downloaded_xlsx()
-        self.input_var = tk.StringVar(value=str(default_input) if default_input else "")
-        self.template_var = tk.StringVar(value=str(DEFAULT_TEMPLATE) if DEFAULT_TEMPLATE.exists() else "")
-        self.download_dir_var = tk.StringVar(value=str(DEFAULT_DOWNLOADS))
-        self.output_dir_var = tk.StringVar(value=str(DEFAULT_OUTPUT_DIR))
+        configured_input = str(self.settings.get("inputFile") or "")
+        configured_template = str(self.settings.get("templateFile") or "")
+        configured_downloads = str(self.settings.get("downloadDir") or "")
+        configured_output = str(self.settings.get("outputDir") or "")
+        self.input_var = tk.StringVar(value=configured_input or (str(default_input) if default_input else ""))
+        self.template_var = tk.StringVar(
+            value=configured_template or (str(DEFAULT_TEMPLATE) if DEFAULT_TEMPLATE.exists() else "")
+        )
+        self.download_dir_var = tk.StringVar(value=configured_downloads or str(DEFAULT_DOWNLOADS))
+        self.output_dir_var = tk.StringVar(value=configured_output or str(DEFAULT_OUTPUT_DIR))
         self.task_index_var = tk.StringVar(value="1")
         self.target_count_var = tk.StringVar(value="60")
-        self.default_target_var = tk.StringVar(value="60")
-        self.watch_timeout_var = tk.StringVar(value="300")
+        self.default_target_var = tk.StringVar(value=str(self.settings.get("defaultTarget") or "60"))
+        self.watch_timeout_var = tk.StringVar(value=str(self.settings.get("watchTimeout") or "300"))
         self.single_json_var = tk.StringVar()
         self.status_var = tk.StringVar(value="1단계: 파일과 저장 위치를 선택하세요.")
+        self.extension_status_var = tk.StringVar(value="확장프로그램 연결 대기")
 
         self.tasks: list[ExportTask] = []
         self.task_rows: list[dict] = []
@@ -462,9 +523,21 @@ class ExcelGui:
         self.stop_requested = False
         self.raw_logs: list[dict] = []
         self.raw_log_lock = threading.Lock()
+        self.file_log_lock = threading.Lock()
+        self.last_extension_version = ""
+        self.last_extension_seen_at = ""
+        self.server_start_error = ""
+
+        try:
+            LOG_DIR.mkdir(parents=True, exist_ok=True)
+            rotate_log_file(APP_LOG_PATH)
+            rotate_log_file(RAW_LOG_PATH)
+        except OSError:
+            pass
 
         self.build()
-        self.start_local_server()
+        if not self.start_local_server():
+            self.root.after(100, self.show_server_start_error)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
     def build(self) -> None:
@@ -500,18 +573,50 @@ class ExcelGui:
         status = ttk.Label(container, textvariable=self.status_var, anchor="w")
         status.grid(row=2, column=0, sticky="ew")
 
-    def start_local_server(self) -> None:
+    def start_local_server(self) -> bool:
         try:
             handler = type("ExportGeniusLocalApiHandler", (LocalApiHandler,), {"app": self})
             self.local_server = ThreadingHTTPServer((LOCAL_SERVER_HOST, LOCAL_SERVER_PORT), handler)
+            self.local_server.daemon_threads = True
             thread = threading.Thread(target=self.local_server.serve_forever, daemon=True)
             thread.start()
+            return True
         except OSError as error:
             self.local_server = None
-            self.status_var.set(f"로컬 연결 서버를 시작하지 못했습니다: {error}")
+            self.server_start_error = (
+                f"로컬 연결 서버를 시작하지 못했습니다.\n\n"
+                f"주소: http://{LOCAL_SERVER_HOST}:{LOCAL_SERVER_PORT}\n"
+                f"원인: {error}\n\n"
+                "프로그램이 이미 실행 중인지 확인한 뒤 다시 실행하세요."
+            )
+            self.status_var.set("프로그램 시작 실패: 로컬 연결 포트 사용 중")
+            return False
+
+    def show_server_start_error(self) -> None:
+        if not self.server_start_error:
+            return
+        messagebox.showerror("프로그램을 시작할 수 없음", self.server_start_error)
+        self.root.destroy()
+
+    def current_settings(self) -> dict:
+        return {
+            "inputFile": self.input_var.get().strip(),
+            "templateFile": self.template_var.get().strip(),
+            "downloadDir": self.download_dir_var.get().strip(),
+            "outputDir": self.output_dir_var.get().strip(),
+            "defaultTarget": self.default_target_var.get().strip(),
+            "watchTimeout": self.watch_timeout_var.get().strip(),
+        }
+
+    def persist_settings(self) -> None:
+        try:
+            save_user_settings(self.current_settings())
+        except OSError as error:
+            self.write_file_log(f"설정 저장 실패: {error}")
 
     def on_close(self) -> None:
         self.stop_event.set()
+        self.persist_settings()
         if self.local_server:
             self.local_server.shutdown()
             self.local_server.server_close()
@@ -520,8 +625,10 @@ class ExcelGui:
     def local_health_payload(self) -> dict:
         return {
             "ok": True,
-            "app": "Export Genius 자동 저장 도구",
+            "app": APP_NAME,
             "version": APP_VERSION,
+            "apiVersion": LOCAL_API_VERSION,
+            "expectedExtensionVersion": EXPECTED_EXTENSION_VERSION,
             "server": f"http://{LOCAL_SERVER_HOST}:{LOCAL_SERVER_PORT}",
         }
 
@@ -752,6 +859,18 @@ class ExcelGui:
             self.raw_logs = self.raw_logs[-30:]
             count = len(self.raw_logs)
 
+        self.write_raw_log(entry)
+
+        if payload.get("type") == "extension-ready":
+            version = str(payload.get("extensionVersion") or "").strip()
+            self.last_extension_version = version
+            self.last_extension_seen_at = entry["receivedAt"]
+            if version == EXPECTED_EXTENSION_VERSION:
+                status = f"확장프로그램 연결됨 ({version})"
+            else:
+                status = f"확장프로그램 버전 불일치 ({version or '확인 불가'})"
+            self.root.after(0, lambda value=status: self.extension_status_var.set(value))
+
         return {"ok": True, "count": count}
 
     def local_stop_request_payload(self) -> dict:
@@ -968,6 +1087,7 @@ class ExcelGui:
         ttk.Button(actions, text="모니터링 시작", command=self.start_gui_automation).pack(side="left")
         ttk.Button(actions, text="모니터링 중단", command=self.stop_gui_automation).pack(side="left", padx=(8, 0))
         ttk.Button(actions, text="원문 로그 보기", command=self.open_raw_log_window).pack(side="left", padx=(8, 0))
+        ttk.Label(actions, textvariable=self.extension_status_var).pack(side="right")
 
         self.watch_log = tk.Text(self.watch_tab, height=18, wrap="word")
         self.watch_log.grid(row=1, column=0, sticky="nsew")
@@ -1004,24 +1124,22 @@ class ExcelGui:
                 [
                     f"Export Genius 자동 저장 도구 {APP_VERSION}",
                     "",
-                    "배포 파일 구성:",
-                    "  ExportGeniusManager.exe",
-                    "  extension/",
-                    "  template.xlsx",
-                    "  README.txt",
-                    "",
                     "기본 사용 순서:",
                     "  1. 파일 선택: 작업 목록 엑셀, 템플릿, 다운로드 폴더, 저장 폴더를 선택합니다.",
                     "  2. 작업 확인: 회사/HS코드 목록을 불러오고 저장 폴더를 만듭니다.",
                     "  3. 모니터링: 자동 실행 진행 상황을 확인합니다.",
-                    "  4. Edge 확장 프로그램에서 같은 HS코드와 금액 조건으로 전체 수집을 실행합니다.",
+                    "  4. GUI에서 모니터링 시작을 누르면 Edge 자동화가 실행됩니다.",
                     "  5. 새 JSON이 다운로드되면 이 프로그램이 확인 후 엑셀 파일로 저장합니다.",
                     "  6. 변환에 성공한 JSON은 결과 폴더의 _json_backup 폴더로 이동됩니다.",
                     "",
                     "Edge 확장 프로그램 확인:",
-                    "  - edge://extensions 에서 개발자 모드를 켜고 extension 폴더를 불러옵니다.",
-                    "  - Export Genius 화면 오른쪽 아래 도우미 패널 버전을 확인합니다.",
+                    "  - 확장프로그램은 배포 담당자가 설치합니다.",
+                    "  - 모니터링 화면 오른쪽 위에서 연결 상태를 확인합니다.",
                     "  - 확장 프로그램은 임시 JSON 다운로드를 담당하고, 이 프로그램은 엑셀 변환 후 JSON을 정리합니다.",
+                    "",
+                    "설정 및 로그:",
+                    f"  - 설정: {SETTINGS_PATH}",
+                    f"  - 로그: {LOG_DIR}",
                     "",
                     "중요한 기준:",
                     "  목표 파일 수는 방문한 회사 수가 아니라 실제 저장된 엑셀 파일 수입니다.",
@@ -1043,6 +1161,7 @@ class ExcelGui:
         )
         if path:
             self.input_var.set(path)
+            self.persist_settings()
 
     def choose_template(self) -> None:
         initial = Path(self.template_var.get()).parent if self.template_var.get() else Path.home()
@@ -1053,6 +1172,7 @@ class ExcelGui:
         )
         if path:
             self.template_var.set(path)
+            self.persist_settings()
 
     def choose_output_dir(self) -> None:
         path = filedialog.askdirectory(
@@ -1061,6 +1181,7 @@ class ExcelGui:
         )
         if path:
             self.output_dir_var.set(path)
+            self.persist_settings()
 
     def choose_single_json(self) -> None:
         path = filedialog.askopenfilename(
@@ -1101,6 +1222,7 @@ class ExcelGui:
 
             self.setup_summary.delete("1.0", tk.END)
             self.setup_summary.insert(tk.END, "\n".join(lines))
+            self.persist_settings()
             self.status_var.set("선택 내용을 확인했습니다.")
         except Exception as error:
             self.status_var.set(f"오류: {error}")
@@ -1366,6 +1488,28 @@ class ExcelGui:
     def append_watch_line(self, line: str) -> None:
         self.watch_log.insert(tk.END, f"{line}\n")
         self.watch_log.see(tk.END)
+        self.write_file_log(line)
+
+    def write_file_log(self, line: str) -> None:
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            with self.file_log_lock:
+                LOG_DIR.mkdir(parents=True, exist_ok=True)
+                rotate_log_file(APP_LOG_PATH)
+                with APP_LOG_PATH.open("a", encoding="utf-8") as stream:
+                    stream.write(f"[{timestamp}] {line}\n")
+        except OSError:
+            return
+
+    def write_raw_log(self, entry: dict) -> None:
+        try:
+            with self.file_log_lock:
+                LOG_DIR.mkdir(parents=True, exist_ok=True)
+                rotate_log_file(RAW_LOG_PATH)
+                with RAW_LOG_PATH.open("a", encoding="utf-8") as stream:
+                    stream.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except OSError:
+            return
 
     def post_watch_message(self, line: str, status: str | None = None) -> None:
         self.root.after(0, lambda: self.append_watch_line(line))
@@ -1421,8 +1565,33 @@ class ExcelGui:
             self.pending_command = command
             return dict(command)
 
+    def check_extension_command_received(self, command_id: int) -> None:
+        with self.command_lock:
+            pending = self.pending_command
+            waiting = bool(
+                pending
+                and pending.get("id") == command_id
+                and not pending.get("claimed")
+            )
+
+        if waiting:
+            message = (
+                "확장프로그램이 시작 명령을 받지 못했습니다. "
+                "Edge에서 Export Genius 검색 결과 페이지가 열려 있는지 확인하세요."
+            )
+            self.append_watch_line(message)
+            self.status_var.set("확장프로그램 연결 확인 필요")
+            self.extension_status_var.set("확장프로그램 응답 없음")
+
     def start_gui_automation(self) -> None:
         try:
+            if not self.local_server:
+                raise RuntimeError("로컬 연결 서버가 실행되지 않아 자동화를 시작할 수 없습니다.")
+            if self.last_extension_version and self.last_extension_version != EXPECTED_EXTENSION_VERSION:
+                raise RuntimeError(
+                    f"확장프로그램 버전이 맞지 않습니다. "
+                    f"필요 버전: {EXPECTED_EXTENSION_VERSION}, 연결 버전: {self.last_extension_version}"
+                )
             if not self.queue_active:
                 self.prepare_selected_queue()
 
@@ -1431,6 +1600,7 @@ class ExcelGui:
             self.append_watch_line("")
             self.append_watch_line("브라우저 자동 실행을 요청했습니다. Export Genius 페이지가 열려 있으면 곧 작업이 시작됩니다.")
             self.status_var.set("브라우저 자동 실행 대기 중")
+            self.root.after(10000, lambda command_id=command["id"]: self.check_extension_command_received(command_id))
         except Exception as error:
             self.status_var.set(f"오류: {error}")
             messagebox.showerror("오류", str(error))
