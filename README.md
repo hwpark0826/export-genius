@@ -131,6 +131,32 @@ manifest JSON 검증:
 python -c "import json; json.load(open('extension/manifest.json', encoding='utf-8')); print('manifest ok')"
 ```
 
+## Windows 패키지 빌드
+
+빌드 전용 Python 환경에는 정상적으로 동작하는 Tcl/Tk, `openpyxl`, PyInstaller가 필요합니다. 현재 빌드 스크립트는 `%LOCALAPPDATA%\Miniconda3-ExportGeniusBuild` 환경을 우선 사용하고, 없으면 `.venv-build`를 사용합니다.
+
+```powershell
+.\build_app.cmd
+```
+
+일반 빌드는 ZIP을 만들지 않고 실행 폴더만 갱신합니다.
+
+```text
+dist\ExportGenius\ExportGenius.exe
+```
+
+실제 배포 ZIP이 필요할 때만 아래 명령을 사용합니다.
+
+```powershell
+.\build_app.cmd -CreateArchive
+```
+
+```text
+release\ExportGenius-<version>-win64.zip
+```
+
+`extension` 폴더와 `사용자_안내.txt`는 배포 폴더 최상위에 함께 복사됩니다. 저장소 루트에 `template.xlsx`가 있으면 배포본에 자동으로 포함되며, 없으면 사용자가 GUI에서 템플릿을 선택해야 합니다.
+
 ## 주의사항
 
 - Export Genius 페이지 구조가 바뀌면 DOM 탐색 로직 수정이 필요할 수 있습니다.

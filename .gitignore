@@ -1,10 +1,12 @@
 auth/
+.agents/
 downloads/
 debug/
 edge-profile/
 output/
 __pycache__/
 *.pyc
-.venv-build/
+.venv-build*/
 build/
 dist/
+release/

@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import ctypes
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -17,9 +18,11 @@ from fill_excel import fill_workbook, load_data, safe_filename
 
 
 APP_NAME = "Export Genius 자동 저장 도구"
-APP_VERSION = "0.3.54"
-EXPECTED_EXTENSION_VERSION = "0.3.54"
+APP_VERSION = "0.3.55"
+EXPECTED_EXTENSION_VERSION = "0.3.55"
 LOCAL_API_VERSION = 1
+SINGLE_INSTANCE_MUTEX_NAME = r"Local\ExportGeniusExcelGui"
+ERROR_ALREADY_EXISTS = 183
 
 
 def resource_dir() -> Path:
@@ -46,6 +49,39 @@ DEFAULT_OUTPUT_DIR = (
 )
 LOCAL_SERVER_HOST = "127.0.0.1"
 LOCAL_SERVER_PORT = 8765
+
+
+def acquire_single_instance_mutex() -> int | None:
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+    kernel32.CreateMutexW.restype = ctypes.c_void_p
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.CloseHandle.restype = ctypes.c_bool
+
+    handle = kernel32.CreateMutexW(None, False, SINGLE_INSTANCE_MUTEX_NAME)
+    if not handle:
+        raise ctypes.WinError(ctypes.get_last_error())
+
+    if ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
+        kernel32.CloseHandle(handle)
+        return None
+
+    return int(handle)
+
+
+def release_single_instance_mutex(handle: int) -> None:
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.CloseHandle.restype = ctypes.c_bool
+    kernel32.CloseHandle(handle)
+
+
+def show_native_message(title: str, message: str, error: bool = False) -> None:
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.MessageBoxW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint]
+    user32.MessageBoxW.restype = ctypes.c_int
+    icon = 0x10 if error else 0x40
+    user32.MessageBoxW(None, message, title, icon)
 
 
 def load_user_settings() -> dict:
@@ -1894,9 +1930,29 @@ class ExcelGui:
 
 
 def main() -> None:
-    root = tk.Tk()
-    ExcelGui(root)
-    root.mainloop()
+    try:
+        mutex_handle = acquire_single_instance_mutex()
+    except OSError as error:
+        show_native_message(
+            "프로그램 시작 오류",
+            f"프로그램 실행 잠금을 만들지 못했습니다.\n\n{error}",
+            error=True,
+        )
+        return
+
+    if mutex_handle is None:
+        show_native_message(
+            "Export Genius",
+            "Export Genius 프로그램이 이미 실행 중입니다.\n기존 창을 확인하세요.",
+        )
+        return
+
+    try:
+        root = tk.Tk()
+        ExcelGui(root)
+        root.mainloop()
+    finally:
+        release_single_instance_mutex(mutex_handle)
 
 
 if __name__ == "__main__":
