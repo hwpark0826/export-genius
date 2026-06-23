@@ -75,9 +75,10 @@ if (Test-Path -LiteralPath $TemplateSource) {
 }
 
 Copy-Item -LiteralPath (Join-Path $ProjectRoot "README.md") -Destination (Join-Path $PackageRoot "README.md") -Force
-$UserGuideSource = Join-Path $ProjectRoot "사용자_안내.txt"
-if (Test-Path -LiteralPath $UserGuideSource) {
-    Copy-Item -LiteralPath $UserGuideSource -Destination (Join-Path $PackageRoot "사용자_안내.txt") -Force
+$UserGuideSources = Get-ChildItem -LiteralPath $ProjectRoot -File -Filter "*.txt" |
+    Where-Object { $_.Name -notlike "requirements*.txt" }
+foreach ($UserGuideSource in $UserGuideSources) {
+    Copy-Item -LiteralPath $UserGuideSource.FullName -Destination (Join-Path $PackageRoot $UserGuideSource.Name) -Force
 }
 
 Write-Output "Build complete: $PackageRoot"

@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 import ctypes
+from decimal import Decimal, InvalidOperation
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -10,7 +11,7 @@ import threading
 import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
 
 from openpyxl import load_workbook
 
@@ -18,8 +19,8 @@ from fill_excel import fill_workbook, load_data, safe_filename
 
 
 APP_NAME = "Export Genius 자동 저장 도구"
-APP_VERSION = "0.3.55"
-EXPECTED_EXTENSION_VERSION = "0.3.55"
+APP_VERSION = "0.3.58"
+EXPECTED_EXTENSION_VERSION = "0.3.58"
 LOCAL_API_VERSION = 1
 SINGLE_INSTANCE_MUTEX_NAME = r"Local\ExportGeniusExcelGui"
 ERROR_ALREADY_EXISTS = 183
@@ -49,6 +50,8 @@ DEFAULT_OUTPUT_DIR = (
 )
 LOCAL_SERVER_HOST = "127.0.0.1"
 LOCAL_SERVER_PORT = 8765
+ALLOWED_BROWSER_ORIGINS = {"https://dashboard.exportgenius.in"}
+ALLOWED_EXTENSION_ORIGIN_PREFIXES = ("chrome-extension://",)
 
 
 def acquire_single_instance_mutex() -> int | None:
@@ -137,6 +140,29 @@ def normalize_hscode(value) -> str:
         text = text[:-2]
 
     return text.zfill(6) if text.isdigit() and len(text) < 6 else text
+
+
+def normalize_usd_condition(value) -> str:
+    text = str(value or "").replace(",", "").replace("$", "").strip()
+    if not text:
+        return ""
+
+    try:
+        number = Decimal(text)
+    except InvalidOperation:
+        return text.lower()
+
+    if number == number.to_integral_value():
+        return str(int(number))
+    return format(number.normalize(), "f")
+
+
+def task_reuse_key(task: ExportTask) -> tuple[str, str, str]:
+    return (
+        normalize_hscode(task.hscode),
+        normalize_usd_condition(task.min_usd),
+        normalize_usd_condition(task.max_usd),
+    )
 
 
 def header_index(headers: list[str], names: list[str]) -> int | None:
@@ -380,6 +406,88 @@ def normalize_name_key(value: str) -> str:
     return "".join(ch.lower() for ch in str(value or "") if ch.isalnum())
 
 
+def ordered_unique_task_xlsx_files(output_root: Path, task: ExportTask) -> list[Path]:
+    candidates: list[Path] = []
+    seen_paths: set[Path] = set()
+
+    for folder in task_output_dirs(output_root, task):
+        if not folder.exists():
+            continue
+        for path in folder.glob("*.xlsx"):
+            resolved = path.resolve()
+            if resolved in seen_paths:
+                continue
+            seen_paths.add(resolved)
+            candidates.append(path)
+
+    candidates.sort(
+        key=lambda path: (
+            0 if xlsx_index_from_path(path) > 0 else 1,
+            xlsx_index_from_path(path) or 0,
+            path.stat().st_mtime,
+            path.name.lower(),
+        )
+    )
+
+    unique: list[Path] = []
+    seen_buyers: set[str] = set()
+    for path in candidates:
+        buyer_key = normalize_name_key(buyer_name_from_xlsx_path(path))
+        if buyer_key and buyer_key in seen_buyers:
+            continue
+        if buyer_key:
+            seen_buyers.add(buyer_key)
+        unique.append(path)
+
+    return unique
+
+
+def copy_reusable_task_xlsx_files(
+    output_root: Path,
+    source_task: ExportTask,
+    destination_task: ExportTask,
+    target_count: int,
+) -> dict:
+    source_files = ordered_unique_task_xlsx_files(output_root, source_task)
+    destination_files = ordered_unique_task_xlsx_files(output_root, destination_task)
+    destination_before = count_task_xlsx_files(output_root, destination_task)
+    destination_count = destination_before
+    destination_dir = task_output_dir(output_root, destination_task)
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    related_folders = task_output_dirs(output_root, destination_task)
+    existing_buyer_keys = {
+        normalize_name_key(buyer_name_from_xlsx_path(path))
+        for path in destination_files
+        if normalize_name_key(buyer_name_from_xlsx_path(path))
+    }
+    copied_files: list[Path] = []
+
+    for source_path in source_files[: max(0, target_count)]:
+        if destination_count >= target_count:
+            break
+
+        buyer_name = buyer_name_from_xlsx_path(source_path)
+        buyer_key = normalize_name_key(buyer_name)
+        if not buyer_name or (buyer_key and buyer_key in existing_buyer_keys):
+            continue
+
+        output_path = next_output_path(destination_dir, buyer_name, related_folders)
+        shutil.copy2(source_path, output_path)
+        copied_files.append(output_path)
+        destination_count += 1
+        if buyer_key:
+            existing_buyer_keys.add(buyer_key)
+
+    return {
+        "sourceAvailable": len(source_files),
+        "sourceConsidered": min(len(source_files), max(0, target_count)),
+        "destinationBefore": destination_before,
+        "destinationAfter": destination_count,
+        "copiedCount": len(copied_files),
+        "copiedFiles": [str(path) for path in copied_files],
+    }
+
+
 def strip_download_suffix(stem: str) -> str:
     text = str(stem or "").strip()
     if text.endswith(")") and " (" in text:
@@ -442,21 +550,66 @@ class LocalApiHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args) -> None:
         return
 
-    def send_json(self, status: int, payload: dict) -> None:
+    def request_origin(self) -> str:
+        return (self.headers.get("Origin") or "").strip()
+
+    def request_origin_allowed(self) -> bool:
+        origin = self.request_origin()
+        if not origin:
+            return True
+        if origin in ALLOWED_BROWSER_ORIGINS:
+            return True
+        return origin.startswith(ALLOWED_EXTENSION_ORIGIN_PREFIXES)
+
+    def reject_disallowed_origin(self) -> bool:
+        if self.request_origin_allowed():
+            return False
+        self.send_json(403, {"ok": False, "reason": "Request origin is not allowed."}, include_cors=False)
+        return True
+
+    def read_json_body(self) -> tuple[str, dict]:
+        length = int(self.headers.get("Content-Length") or "0")
+        body = self.rfile.read(length).decode("utf-8", errors="replace") if length > 0 else ""
+        if not body:
+            return body, {}
+        payload = json.loads(body)
+        if not isinstance(payload, dict):
+            raise ValueError("JSON request body must be an object.")
+        return body, payload
+
+    @staticmethod
+    def payload_as_query(payload: dict) -> dict[str, list[str]]:
+        return {
+            str(key): [str(value)]
+            for key, value in payload.items()
+            if value is not None
+        }
+
+    def send_json(self, status: int, payload: dict, include_cors: bool = True) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        if include_cors:
+            origin = self.request_origin()
+            if origin and self.request_origin_allowed():
+                self.send_header("Access-Control-Allow-Origin", origin)
+                self.send_header("Vary", "Origin")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            if self.headers.get("Access-Control-Request-Private-Network") == "true":
+                self.send_header("Access-Control-Allow-Private-Network", "true")
         self.end_headers()
         self.wfile.write(body)
 
     def do_OPTIONS(self) -> None:
+        if self.reject_disallowed_origin():
+            return
         self.send_json(200, {"ok": True})
 
     def do_GET(self) -> None:
+        if self.reject_disallowed_origin():
+            return
         parsed = urlparse(self.path)
 
         if parsed.path == "/health":
@@ -471,43 +624,50 @@ class LocalApiHandler(BaseHTTPRequestHandler):
             self.send_json(200, self.app.local_queue_current_payload())
             return
 
-        if parsed.path == "/queue/complete":
-            self.send_json(200, self.app.local_queue_complete_payload(parse_qs(parsed.query)))
-            return
-
-        if parsed.path == "/queue/fail":
-            self.send_json(200, self.app.local_queue_fail_payload(parse_qs(parsed.query)))
-            return
-
-        if parsed.path == "/log":
-            self.send_json(200, self.app.local_log_payload(parse_qs(parsed.query)))
-            return
-
-        if parsed.path == "/command":
-            self.send_json(200, self.app.local_command_payload())
-            return
-
-        if parsed.path == "/command-result":
-            self.send_json(200, self.app.local_command_result_payload(parse_qs(parsed.query)))
-            return
-
         if parsed.path == "/stop-request":
             self.send_json(200, self.app.local_stop_request_payload())
-            return
-
-        if parsed.path == "/download-confirm":
-            self.send_json(200, self.app.local_download_confirm_payload(parse_qs(parsed.query)))
             return
 
         self.send_json(404, {"ok": False, "reason": "Unknown endpoint."})
 
     def do_POST(self) -> None:
+        if self.reject_disallowed_origin():
+            return
         parsed = urlparse(self.path)
 
-        if parsed.path == "/raw-log":
-            length = int(self.headers.get("Content-Length") or "0")
-            body = self.rfile.read(length).decode("utf-8", errors="replace") if length > 0 else ""
-            self.send_json(200, self.app.local_raw_log_payload(body))
+        try:
+            body, payload = self.read_json_body()
+            query = self.payload_as_query(payload)
+
+            if parsed.path == "/queue/complete":
+                self.send_json(200, self.app.local_queue_complete_payload(query))
+                return
+
+            if parsed.path == "/queue/fail":
+                self.send_json(200, self.app.local_queue_fail_payload(query))
+                return
+
+            if parsed.path == "/log":
+                self.send_json(200, self.app.local_log_payload(query))
+                return
+
+            if parsed.path == "/command":
+                self.send_json(200, self.app.local_command_payload())
+                return
+
+            if parsed.path == "/command-result":
+                self.send_json(200, self.app.local_command_result_payload(query))
+                return
+
+            if parsed.path == "/download-confirm":
+                self.send_json(200, self.app.local_download_confirm_payload(query))
+                return
+
+            if parsed.path == "/raw-log":
+                self.send_json(200, self.app.local_raw_log_payload(body))
+                return
+        except (ValueError, json.JSONDecodeError) as error:
+            self.send_json(400, {"ok": False, "reason": f"Invalid JSON request: {error}"})
             return
 
         self.send_json(404, {"ok": False, "reason": "Unknown endpoint."})
@@ -712,6 +872,76 @@ class ExcelGui:
             "queueTaskId": queue_task_id or "",
         }
 
+    def reuse_results_for_task(self, row_index: int, target_count: int | str) -> dict:
+        if row_index < 0 or row_index >= len(self.task_rows):
+            return {"ok": False, "reason": "Destination task row is out of range.", "copiedCount": 0}
+
+        output_root = Path(self.output_dir_var.get())
+        destination_task = self.task_rows[row_index]["task"]
+        destination_key = task_reuse_key(destination_task)
+        destination_dir = task_output_dir(output_root, destination_task).resolve()
+        candidates: list[tuple[int, int, ExportTask]] = []
+
+        for source_index, source_row in enumerate(self.task_rows):
+            if source_index == row_index:
+                continue
+
+            source_task = source_row["task"]
+            if task_reuse_key(source_task) != destination_key:
+                continue
+            if task_output_dir(output_root, source_task).resolve() == destination_dir:
+                continue
+
+            available = len(ordered_unique_task_xlsx_files(output_root, source_task))
+            if available > 0:
+                candidates.append((available, source_index, source_task))
+
+        if not candidates:
+            return {
+                "ok": True,
+                "copiedCount": 0,
+                "reason": "No reusable task results were found.",
+            }
+
+        available, source_index, source_task = max(candidates, key=lambda item: (item[0], -item[1]))
+        result = copy_reusable_task_xlsx_files(
+            output_root,
+            source_task,
+            destination_task,
+            max(0, int(target_count)),
+        )
+        result.update(
+            {
+                "ok": True,
+                "sourceRowIndex": source_index,
+                "sourceCompany": source_task.company,
+                "sourceHsCode": source_task.hscode,
+                "sourceAvailable": available,
+                "destinationRowIndex": row_index,
+                "destinationCompany": destination_task.company,
+                "destinationHsCode": destination_task.hscode,
+                "reuseKey": destination_key,
+            }
+        )
+
+        if result["copiedCount"]:
+            self.task_rows[row_index]["status"] = (
+                f"재사용 {result['destinationAfter']}/{max(1, int(target_count))}"
+            )
+
+        return result
+
+    def report_reused_results(self, result: dict) -> None:
+        copied = int(result.get("copiedCount") or 0)
+        if copied <= 0:
+            return
+
+        self.post_watch_message(
+            f"[결과 재사용] {result.get('sourceCompany')} / HS {result.get('sourceHsCode')} 결과에서 "
+            f"{copied}개를 복사했습니다. 현재 {result.get('destinationAfter')}개입니다.",
+            "결과 재사용",
+        )
+
     def set_current_task_payload(self, payload: dict | None) -> None:
         with self.payload_lock:
             self.current_task_payload = dict(payload) if payload else None
@@ -731,18 +961,21 @@ class ExcelGui:
             row = self.task_rows[row_index]
             task = row["task"]
             target = row["target"]
+            reuse_result = self.reuse_results_for_task(row_index, target)
             row["status"] = "진행중"
             queue_task_id = self.queue_task_ids.get(row_index, "")
             payload = self.task_payload(task, row_index + 1, target, queue_task_id)
             self.set_current_task_payload(payload)
 
             self.root.after(0, self.refresh_task_tree)
+            self.report_reused_results(reuse_result)
             return {
                 "ok": True,
                 "done": False,
                 "queuePosition": self.queue_position + 1,
                 "queueTotal": len(self.queue_indices),
                 "task": payload,
+                "reuse": reuse_result,
             }
 
     def local_queue_complete_payload(self, query: dict[str, list[str]]) -> dict:
@@ -862,22 +1095,39 @@ class ExcelGui:
 
             self.task_rows[row_index]["status"] = f"완료 {saved_count}/{target}"
             self.queue_position += 1
-            done = self.queue_position >= len(self.queue_indices)
+            reused_next_tasks: list[dict] = []
+            next_payload = None
 
-            if done:
-                self.queue_active = False
-                self.queue_task_ids = {}
-                next_payload = None
-            else:
+            while self.queue_position < len(self.queue_indices):
                 next_row_index = self.queue_indices[self.queue_position]
                 next_row = self.task_rows[next_row_index]
-                next_row["status"] = "준비됨"
+                next_target = int(next_row["target"])
+                reuse_result = self.reuse_results_for_task(next_row_index, next_target)
+                if int(reuse_result.get("copiedCount") or 0) > 0:
+                    reused_next_tasks.append(reuse_result)
+
+                next_saved_count = count_task_xlsx_files(
+                    Path(self.output_dir_var.get()),
+                    next_row["task"],
+                )
+                if next_saved_count >= next_target:
+                    next_row["status"] = f"완료 (재사용) {next_saved_count}/{next_target}"
+                    self.queue_position += 1
+                    continue
+
+                next_row["status"] = f"준비됨 {next_saved_count}/{next_target}"
                 next_payload = self.task_payload(
                     next_row["task"],
                     next_row_index + 1,
-                    next_row["target"],
+                    next_target,
                     self.queue_task_ids.get(next_row_index, ""),
                 )
+                break
+
+            done = self.queue_position >= len(self.queue_indices)
+            if done:
+                self.queue_active = False
+                self.queue_task_ids = {}
 
             self.set_current_task_payload(next_payload)
             result = {
@@ -886,12 +1136,15 @@ class ExcelGui:
                 "savedCount": saved_count,
                 "targetCount": target,
                 "nextTask": next_payload,
+                "reusedNextTasks": reused_next_tasks,
             }
             self.queue_completion_results[requested_task_id] = result
             completion_event.set()
 
         self.root.after(0, self.refresh_task_tree)
         self.post_watch_message(f"자동 작업 완료: {task.company} / {task.hscode} - 엑셀 {saved_count}개")
+        for reuse_result in reused_next_tasks:
+            self.report_reused_results(reuse_result)
         return result
 
     def local_queue_fail_payload(self, query: dict[str, list[str]]) -> dict:
@@ -1470,11 +1723,15 @@ class ExcelGui:
             output_root = Path(self.output_dir_var.get())
             output_root.mkdir(parents=True, exist_ok=True)
             resumable_indexes = []
+            reuse_results = []
             for index in selected_indexes:
                 task = self.task_rows[index]["task"]
                 target = int(self.task_rows[index]["target"])
                 task_dir = task_output_dir(output_root, task)
                 task_dir.mkdir(parents=True, exist_ok=True)
+                reuse_result = self.reuse_results_for_task(index, target)
+                if int(reuse_result.get("copiedCount") or 0) > 0:
+                    reuse_results.append(reuse_result)
                 saved_count = count_task_xlsx_files(output_root, task)
 
                 if saved_count >= target:
@@ -1487,6 +1744,12 @@ class ExcelGui:
                 self.refresh_task_tree()
                 self.notebook.select(self.watch_tab)
                 self.watch_log.delete("1.0", tk.END)
+                for reuse_result in reuse_results:
+                    self.append_watch_line(
+                        f"[결과 재사용] {reuse_result.get('sourceCompany')} / "
+                        f"HS {reuse_result.get('sourceHsCode')} 결과에서 "
+                        f"{reuse_result.get('copiedCount')}개를 복사했습니다."
+                    )
                 self.append_watch_line("선택한 작업은 이미 목표 개수만큼 엑셀이 저장되어 있습니다.")
                 self.status_var.set("이어할 작업 없음")
                 return
@@ -1517,6 +1780,12 @@ class ExcelGui:
             self.refresh_task_tree()
             self.notebook.select(self.watch_tab)
             self.watch_log.delete("1.0", tk.END)
+            for reuse_result in reuse_results:
+                self.append_watch_line(
+                    f"[결과 재사용] {reuse_result.get('sourceCompany')} / "
+                    f"HS {reuse_result.get('sourceHsCode')} 결과에서 "
+                    f"{reuse_result.get('copiedCount')}개를 복사했습니다."
+                )
             self.append_watch_line(f"이어하기 준비 완료: 부족한 작업 {len(resumable_indexes)}개")
             self.append_watch_line("이미 저장된 엑셀 파일은 그대로 인정하고, 부족한 개수만 더 수집합니다.")
             self.status_var.set(f"이어하기 준비 완료: {len(resumable_indexes)}개 작업")

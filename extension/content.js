@@ -1,5 +1,5 @@
 (() => {
-  const HELPER_VERSION = "v2026-06-22-persistent-record-recovery";
+  const HELPER_VERSION = "v2026-06-23-seven-times-and-queue-wait";
   const EXTENSION_VERSION = chrome.runtime?.getManifest?.().version || "";
   const LOCAL_API_VERSION = 1;
   const USE_SAVED_BUYER_SKIP_RESUME = false;
@@ -7,6 +7,10 @@
   const RECORD_NOT_FOUND_RECOVERY_KEY = "exportGeniusRecordNotFoundRecovery";
   const LOCAL_GUI_URL = "http://127.0.0.1:8765";
   const MAX_RECORD_NOT_FOUND_RECOVERY = 3;
+  const MAX_PROFILE_LOAD_RECOVERY = 2;
+  const DOM_STRUCTURE_ERROR_PREFIX = "Homepage DOM structure change suspected";
+  const HUMAN_DELAY_MULTIPLIER = 7.0;
+  const NEXT_TASK_DELAY_RANGE_SECONDS = Object.freeze([60, 180]);
   const HUMAN_DELAY_RANGES = Object.freeze({
     input: [220, 520],
     control: [450, 950],
@@ -27,12 +31,57 @@
   }
 
   async function humanPause(kindOrMin = "control", explicitMax = null) {
-    const [minMs, maxMs] = Number.isFinite(kindOrMin)
+    const [baseMinMs, baseMaxMs] = Number.isFinite(kindOrMin)
       ? [kindOrMin, Number.isFinite(explicitMax) ? Math.max(kindOrMin, explicitMax) : kindOrMin]
       : (HUMAN_DELAY_RANGES[kindOrMin] || HUMAN_DELAY_RANGES.control);
+    const minMs = Math.round(baseMinMs * HUMAN_DELAY_MULTIPLIER);
+    const maxMs = Math.round(baseMaxMs * HUMAN_DELAY_MULTIPLIER);
     const duration = Math.floor(minMs + Math.random() * (maxMs - minMs + 1));
     await sleep(duration);
     return duration;
+  }
+
+  function randomInteger(minimum, maximum) {
+    const min = Math.ceil(minimum);
+    const max = Math.floor(Math.max(minimum, maximum));
+    return Math.floor(min + Math.random() * (max - min + 1));
+  }
+
+  async function waitBeforeNextQueueTask() {
+    const [minimumSeconds, maximumSeconds] = NEXT_TASK_DELAY_RANGE_SECONDS;
+    const delaySeconds = randomInteger(minimumSeconds, maximumSeconds);
+    await postLocalGuiLog(
+      `[작업 대기] ${delaySeconds}초 후 다음 작업을 시작합니다.`,
+      "다음 작업 대기"
+    );
+
+    const deadline = Date.now() + delaySeconds * 1000;
+    let lastServerStopCheck = 0;
+    while (Date.now() < deadline) {
+      const now = Date.now();
+      let stopped = localExtensionStopRequested;
+      if (!stopped && now - lastServerStopCheck >= 5000) {
+        lastServerStopCheck = now;
+        stopped = await getLocalGuiStopRequested();
+      }
+
+      if (stopped) {
+        return {
+          ok: false,
+          stopped: true,
+          reason: "Stopped by GUI request during the next-task delay.",
+          delaySeconds
+        };
+      }
+
+      await sleep(Math.min(1000, Math.max(0, deadline - Date.now())));
+    }
+
+    return {
+      ok: true,
+      stopped: false,
+      delaySeconds
+    };
   }
 
   async function waitUntil(predicate, timeoutMs = 20000, intervalMs = 300, settleMs = 0) {
@@ -130,7 +179,7 @@
 
     return {
       highlighted: elements.length,
-      message: "蹂댁씠???낅젰李?踰꾪듉??鍮④컙 ?쒖떆瑜??덉뒿?덈떎."
+      message: "보이는 입력창과 버튼에 빨간 표시를 했습니다."
     };
   }
 
@@ -152,7 +201,7 @@
 
     return {
       ok: true,
-      message: "泥?踰덉㎏ ?낅젰 媛?ν븳 ?꾨뱶??test瑜??낅젰?덉뒿?덈떎.",
+      message: "첫 번째 입력 가능한 필드에 test를 입력했습니다.",
       element: describeElement(input)
     };
   }
@@ -173,6 +222,183 @@
     return Array.from(String(value || "").toLowerCase())
       .filter((character) => /[a-z0-9]/.test(character))
       .join("");
+  }
+
+  function visibleSelectorExists(selector) {
+    return Array.from(document.querySelectorAll(selector)).some((element) => visibleElement(element));
+  }
+
+  function pageBlockerSnapshot() {
+    const bodyText = textOf(document.body);
+    const normalized = normalizeText(bodyText);
+    const url = location.href.toLowerCase();
+    const challenge = url.includes("challenge") ||
+      normalized.includes("justamoment") ||
+      normalized.includes("verifyyouarehuman") ||
+      normalized.includes("checkingyourbrowser");
+    const login = /\/(login|signin|auth)(?:[/?#]|$)/i.test(location.pathname) ||
+      (visibleSelectorExists("input[type='password']") && !location.pathname.includes("search-results"));
+    const networkError = normalized.includes("thissitecantbereached") ||
+      normalized.includes("errconnection") ||
+      normalized.includes("networkerror");
+
+    return {
+      challenge,
+      login,
+      networkError,
+      blocked: challenge || login || networkError
+    };
+  }
+
+  function resultRowsWithNumbers() {
+    return Array.from(document.querySelectorAll(".G-table-row, [role='row'][data-cy='table-row'], [role='row'], tr"))
+      .filter((row) => {
+        if (!visibleElement(row)) {
+          return false;
+        }
+
+        return Array.from(row.querySelectorAll(".td[title], [role='cell'][title], td[title], div[title]"))
+          .some((cell) => /^\d+$/.test(String(cell.getAttribute("title") || "").trim()));
+      });
+  }
+
+  function inspectDomContract(screen, details = {}) {
+    const blocker = pageBlockerSnapshot();
+    const bodyText = textOf(document.body);
+    const normalizedBody = normalizeText(bodyText);
+    const common = {
+      url: location.href,
+      route: location.pathname,
+      rootPresent: Boolean(document.getElementById("root")),
+      bodyTextLength: bodyText.length,
+      busy: pageLooksBusy(),
+      recordNotFound: pageShowsRecordNotFound(),
+      blocker
+    };
+    const missing = [];
+    const observed = {};
+    let strongEvidence = false;
+
+    if (screen === "criteria") {
+      observed.startDate = visibleSelectorExists("input[placeholder='Start date']");
+      observed.endDate = visibleSelectorExists("input[placeholder='End date']");
+      observed.filterSelect = Boolean(getTopFilterTrigger("filter") || getTopFilterCombobox("filter"));
+      observed.conditionSelect = Boolean(getTopFilterTrigger("condition") || getTopFilterCombobox("condition"));
+      observed.detailsInput = visibleSelectorExists("#enter-detail-input, input[placeholder='Enter details']");
+      observed.applyControl = Boolean(findExactControl("Apply", "button, [role='button']"));
+
+      if (!observed.startDate || !observed.endDate) missing.push("date inputs");
+      if (!observed.filterSelect) missing.push("filter selector");
+      if (!observed.conditionSelect) missing.push("condition selector");
+      if (!observed.detailsInput) missing.push("filter detail input");
+      if (!observed.applyControl) missing.push("Apply control");
+    } else if (screen === "results" || screen === "pagination") {
+      const rows = resultRowsWithNumbers();
+      const candidates = getImporterCandidates();
+      const rowRange = candidateRowRange(candidates);
+      observed.importersContext = Boolean(findExactControl("Importers", "button, a, [role='button']")) ||
+        normalizedBody.includes("allimporters");
+      observed.numberedRows = rows.length;
+      observed.buyerCandidates = candidates.length;
+      observed.rowRange = rowRange;
+      observed.pagination = visibleSelectorExists(
+        "ul[role='navigation'][aria-label='Pagination'], nav[aria-label='Pagination'], .EG-pagination, .pagination, .ant-pagination"
+      );
+      observed.currentPage = currentPaginationPage();
+      observed.nextControlPresent = Boolean(document.querySelector(
+        "a[aria-label='Next page'], button[aria-label='Next page'], a[rel='next'], button[rel='next']"
+      ));
+
+      if (!observed.importersContext) missing.push("Importers context");
+      if (!rows.length && !common.recordNotFound && !common.busy) missing.push("numbered buyer rows");
+      if (rows.length && !candidates.length) {
+        missing.push("buyer name elements inside rows");
+        strongEvidence = true;
+      }
+      if (screen === "pagination" || details.requirePagination) {
+        if (!observed.pagination) missing.push("pagination container");
+        if (!Number.isFinite(observed.currentPage)) missing.push("current-page marker");
+        if (!observed.nextControlPresent && details.expectNext !== false) missing.push("Next page control");
+      }
+    } else if (screen === "profile" || screen === "commodity" || screen === "country") {
+      const overview = extractOverviewProfile();
+      observed.profileRoute = location.pathname.includes("company-profile");
+      observed.overviewControl = Boolean(findExactControl("Overview", "a, button, [role='button']"));
+      observed.commoditiesControl = Boolean(findExactControl("Commodities", "a, button, [role='button']"));
+      observed.logoCompanyNames = overview.raw?.logoCompanyCandidates || [];
+      observed.annualTurnoverLabel = normalizedBody.includes("annualturnover");
+      observed.annualShipmentLabel = normalizedBody.includes("annualshipment");
+
+      if (!observed.profileRoute) missing.push("company-profile route");
+      if (!observed.overviewControl) missing.push("Overview control");
+      if (!observed.commoditiesControl) missing.push("Commodities control");
+      if (!observed.logoCompanyNames.length) missing.push("profile company name");
+      if (!observed.annualTurnoverLabel) missing.push("Annual Turnover section");
+      if (!observed.annualShipmentLabel) missing.push("Annual Shipment section");
+
+      if (screen === "commodity") {
+        observed.importCommoditiesControl = Boolean(findExactControl("Import Commodities", "button, a, [role='button']"));
+        observed.importCommodityRows = parseCommodityRowsFromText(bodyText, "import").length;
+        observed.noDataMessage = normalizedBody.includes("nodata") || common.recordNotFound;
+        if (!observed.importCommoditiesControl) missing.push("Import Commodities control");
+        if (details.parserFailed && !observed.importCommodityRows && !observed.noDataMessage) {
+          missing.push("Import Commodities rows");
+          strongEvidence = observed.importCommoditiesControl && normalizedBody.includes("importvaluein");
+        }
+      } else if (screen === "country") {
+        observed.countriesControl = Boolean(findExactControl("Countries", "a, button, [role='button']"));
+        observed.importCountriesControl = Boolean(findExactControl("Import Countries", "button, a, [role='button']"));
+        observed.importCountryRows = parseCountryRowsFromText(bodyText, "import").length;
+        observed.noDataMessage = normalizedBody.includes("nodata") || common.recordNotFound;
+        if (!observed.countriesControl) missing.push("Countries control");
+        if (!observed.importCountriesControl) missing.push("Import Countries control");
+        if (details.parserFailed && !observed.importCountryRows && !observed.noDataMessage) {
+          missing.push("Import Countries rows");
+          strongEvidence = observed.importCountriesControl && normalizedBody.includes("importvaluein");
+        }
+      }
+    }
+
+    const pageLoaded = common.rootPresent && common.bodyTextLength > 300;
+    const suspected = pageLoaded && !blocker.blocked && !common.busy && !common.recordNotFound &&
+      (strongEvidence || missing.length >= 2);
+
+    return {
+      screen,
+      operation: details.operation || "",
+      suspected,
+      missing,
+      observed,
+      common
+    };
+  }
+
+  async function diagnoseDomFailure(screen, operation, reason, details = {}) {
+    const assessment = inspectDomContract(screen, { ...details, operation });
+    const finalReason = assessment.suspected
+      ? `${DOM_STRUCTURE_ERROR_PREFIX}: ${screen} (${assessment.missing.join(", ")})`
+      : reason;
+
+    await postLocalGuiRawLog({
+      type: assessment.suspected ? "dom-structure-change-suspected" : "dom-contract-failure",
+      reason,
+      finalReason,
+      assessment,
+      details
+    });
+
+    if (assessment.suspected) {
+      await postLocalGuiLog(
+        `[홈페이지 구조 변경 의심] ${screen}: ${assessment.missing.join(", ")}`,
+        "구조 변경 의심"
+      );
+    }
+
+    return {
+      reason: finalReason,
+      domChangeSuspected: assessment.suspected,
+      domAssessment: assessment
+    };
   }
 
   function matchesExactText(element, expectedTexts) {
@@ -512,14 +738,10 @@
   }
 
   async function openAntdSelect(selector, searchInput = null) {
-    selector.scrollIntoView({ block: "center", inline: "nearest" });
-    selector.dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
-    selector.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
-    selector.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
-    selector.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
-    selector.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
-    selector.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
-    selector.click();
+    const activation = clickElement(selector);
+    if (!activation.ok) {
+      return activation;
+    }
 
     if (searchInput) {
       searchInput.focus();
@@ -527,6 +749,7 @@
     }
 
     await humanPause(500, 900);
+    return { ok: true, activation };
   }
 
   async function chooseAntdTopFilterSelect(kind, optionTexts) {
@@ -544,7 +767,15 @@
 
     closeOpenMenus();
     await humanPause(150, 400);
-    await openAntdSelect(selector, searchInput);
+    const opened = await openAntdSelect(selector, searchInput);
+    if (!opened.ok) {
+      return {
+        ok: false,
+        reason: `${kind} AntD selector could not be opened: ${opened.reason}`,
+        container: describeElement(container),
+        activation: opened
+      };
+    }
 
     let option = findAntdOption(optionTexts);
     let usedSearch = false;
@@ -562,7 +793,15 @@
     if (!option) {
       closeOpenMenus();
       await humanPause(250, 550);
-      await openAntdSelect(selector, searchInput);
+      const reopened = await openAntdSelect(selector, searchInput);
+      if (!reopened.ok) {
+        return {
+          ok: false,
+          reason: `${kind} AntD selector could not be reopened: ${reopened.reason}`,
+          container: describeElement(container),
+          activation: reopened
+        };
+      }
       option = findAntdOption(optionTexts);
     }
 
@@ -639,19 +878,66 @@
       })[0];
   }
 
-  function clickElement(element) {
+  function elementActivationState(element) {
+    if (!element) {
+      return { ok: false, reason: "element not found" };
+    }
+
     element.scrollIntoView({ block: "center", inline: "center" });
     const rect = element.getBoundingClientRect();
     const x = rect.left + rect.width / 2;
     const y = rect.top + rect.height / 2;
+    const disabled = element.disabled === true ||
+      element.hasAttribute("disabled") ||
+      element.getAttribute("aria-disabled") === "true" ||
+      Boolean(element.closest(".disabled, .ant-btn-disabled, .ant-pagination-disabled, [aria-disabled='true']"));
+    const style = getComputedStyle(element);
+    const topElement = rect.width > 0 && rect.height > 0
+      ? document.elementFromPoint(x, y)
+      : null;
+    const unobscured = Boolean(topElement && (
+      topElement === element ||
+      element.contains(topElement) ||
+      topElement.contains(element)
+    ));
+
+    if (disabled) {
+      return { ok: false, reason: "element is disabled", element: describeElement(element) };
+    }
+    if (rect.width <= 0 || rect.height <= 0 || style.visibility === "hidden" || style.display === "none") {
+      return { ok: false, reason: "element is not visible", element: describeElement(element) };
+    }
+    if (style.pointerEvents === "none") {
+      return { ok: false, reason: "element does not accept pointer events", element: describeElement(element) };
+    }
+    if (!unobscured) {
+      return {
+        ok: false,
+        reason: "element center is covered by another element",
+        element: describeElement(element),
+        coveringElement: topElement ? describeElement(topElement) : null
+      };
+    }
+
+    return { ok: true, element, x, y };
+  }
+
+  function clickElement(element) {
+    const activation = elementActivationState(element);
+    if (!activation.ok) {
+      return activation;
+    }
+
+    const { x, y } = activation;
 
     element.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, clientX: x, clientY: y }));
-    element.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, clientX: x, clientY: y }));
     element.dispatchEvent(new MouseEvent("mouseover", { bubbles: true, clientX: x, clientY: y }));
+    element.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, clientX: x, clientY: y }));
     element.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, clientX: x, clientY: y }));
-    element.click();
-    element.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, clientX: x, clientY: y }));
     element.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, clientX: x, clientY: y }));
+    element.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, clientX: x, clientY: y }));
+    element.click();
+    return { ok: true, clicked: describeElement(element) };
   }
 
   function installSameTabWindowOpenOverride() {
@@ -801,11 +1087,20 @@
       };
     }
 
-    clickElement(target);
+    const activation = clickElement(target);
+    if (!activation.ok) {
+      return {
+        ok: false,
+        reason: `${text} could not be clicked: ${activation.reason}`,
+        target: describeElement(target),
+        activation
+      };
+    }
 
     return {
       ok: true,
-      clicked: describeElement(target)
+      clicked: describeElement(target),
+      activation
     };
   }
 
@@ -924,6 +1219,7 @@
     const hsMatches = normalizedTexts.filter((text) => text.includes(expectedHsText));
     const usdMatches = normalizedTexts.filter((text) => text.includes(expectedUsdText));
     const filterCount = appliedFilterCount();
+    const removeUnknownExporter = readRemoveUnknownExporterState();
     const datesMatch = Boolean(
       startInput && endInput &&
       startInput.value === expectedRange.start &&
@@ -934,7 +1230,8 @@
       exactFilterCount: filterCount === 2,
       hsCode: hsMatches.length > 0,
       totalValueUsd: usdMatches.length > 0,
-      dates: datesMatch
+      dates: datesMatch,
+      removeUnknownExporter: removeUnknownExporter.found && removeUnknownExporter.enabled
     };
 
     return {
@@ -951,6 +1248,10 @@
         filterCount,
         startDate: startInput?.value || "",
         endDate: endInput?.value || "",
+        removeUnknownExporter: {
+          found: removeUnknownExporter.found,
+          enabled: removeUnknownExporter.enabled
+        },
         criteriaTexts
       }
     };
@@ -1009,8 +1310,13 @@
     dispatchValue(endInput, range.end);
     await humanPause("input");
 
+    const confirmed = await waitUntil(() => {
+      return startInput.value === range.start && endInput.value === range.end;
+    }, 3000, 250, 250);
+
     return {
-      ok: true,
+      ok: Boolean(confirmed),
+      reason: confirmed ? "" : "date input values did not match the requested range",
       range
     };
   }
@@ -1028,8 +1334,25 @@
     await humanPause(2000, 3000);
 
     const filterResult = await chooseTopFilterSelect("filter", ["hs code", "hscode"]);
+    if (!filterResult.ok) {
+      return {
+        ok: false,
+        reason: filterResult.reason || "HS code filter selector failed",
+        filter: filterResult
+      };
+    }
+
     await humanPause(2000, 3000);
     const conditionResult = await chooseTopFilterSelect("condition", ["begin with"]);
+    if (!conditionResult.ok) {
+      return {
+        ok: false,
+        reason: conditionResult.reason || "HS code condition selector failed",
+        filter: filterResult,
+        condition: conditionResult
+      };
+    }
+
     await humanPause(2000, 3000);
     const detailInput = document.getElementById("enter-detail-input") ||
       Array.from(document.querySelectorAll("input")).find((element) => element.placeholder === "Enter details");
@@ -1390,6 +1713,38 @@
     };
   }
 
+  function readRemoveUnknownExporterState() {
+    const container = Array.from(document.querySelectorAll(".radio-filler, label, [role='switch'], div"))
+      .filter((element) => {
+        if (isHelperElement(element)) {
+          return false;
+        }
+
+        const normalized = normalizeText(textOf(element));
+        return normalized.includes("removeunknownexporter") && normalized.includes("supplier");
+      })
+      .sort((a, b) => {
+        const aRect = a.getBoundingClientRect();
+        const bRect = b.getBoundingClientRect();
+        return aRect.width * aRect.height - bRect.width * bRect.height;
+      })[0] || null;
+    const control = container?.querySelector("input[type='checkbox'], input[type='radio'], [role='checkbox'], [role='switch']") ||
+      container?.closest("[role='switch'], label")?.querySelector("input[type='checkbox'], input[type='radio'], [role='checkbox'], [role='switch']") ||
+      null;
+    const enabled = Boolean(control && (
+      control.checked === true ||
+      control.getAttribute("aria-checked") === "true" ||
+      control.getAttribute("data-state") === "checked"
+    ));
+
+    return {
+      found: Boolean(container && control),
+      enabled,
+      container,
+      control
+    };
+  }
+
   async function enableRemoveUnknownExporter() {
     const header = Array.from(document.querySelectorAll("p.header-filler, p, div"))
       .find((element) => {
@@ -1444,12 +1799,17 @@
         directCheckbox.dispatchEvent(new Event("change", { bubbles: true }));
       }
 
-      const resultsStable = await waitForResultsStable(12000);
+      const confirmed = await waitUntil(() => {
+        const state = readRemoveUnknownExporterState();
+        return state.enabled ? state : null;
+      }, 6000, 300, 300);
+      const resultsStable = confirmed ? await waitForResultsStable(12000) : null;
 
       return {
-        ok: true,
+        ok: Boolean(confirmed),
+        reason: confirmed ? "" : "Remove Unknown Exporter switch did not become enabled.",
         method: "checkbox",
-        checked: directCheckbox.checked,
+        checked: Boolean(confirmed?.enabled),
         control: describeElement(directCheckbox),
         switchLabel: describeElement(switchLabel),
         slider: describeElement(slider),
@@ -1495,10 +1855,15 @@
         clickElement(checkbox);
       }
 
-      const resultsStable = await waitForResultsStable(12000);
+      const confirmed = await waitUntil(() => {
+        const state = readRemoveUnknownExporterState();
+        return state.enabled ? state : null;
+      }, 6000, 300, 300);
+      const resultsStable = confirmed ? await waitForResultsStable(12000) : null;
 
       return {
-        ok: true,
+        ok: Boolean(confirmed),
+        reason: confirmed ? "" : "Remove Unknown Exporter checkbox did not become enabled.",
         alreadyChecked,
         control: describeElement(checkbox),
         resultsStable
@@ -1513,10 +1878,15 @@
       await humanPause("control");
       clickElement(switchTarget);
 
-      const resultsStable = await waitForResultsStable(12000);
+      const confirmed = await waitUntil(() => {
+        const state = readRemoveUnknownExporterState();
+        return state.enabled ? state : null;
+      }, 6000, 300, 300);
+      const resultsStable = confirmed ? await waitForResultsStable(12000) : null;
 
       return {
-        ok: true,
+        ok: Boolean(confirmed),
+        reason: confirmed ? "" : "Remove Unknown Exporter switch state could not be verified.",
         clickedSwitch: describeElement(switchTarget),
         resultsStable
       };
@@ -1524,22 +1894,52 @@
 
     await humanPause("control");
     clickElement(label);
-    const resultsStable = await waitForResultsStable(12000);
+    const confirmed = await waitUntil(() => {
+      const state = readRemoveUnknownExporterState();
+      return state.enabled ? state : null;
+    }, 6000, 300, 300);
+    const resultsStable = confirmed ? await waitForResultsStable(12000) : null;
 
     return {
-      ok: true,
+      ok: Boolean(confirmed),
+      reason: confirmed ? "" : "Remove Unknown Exporter state could not be verified after clicking its label.",
       clickedLabel: describeElement(label),
       resultsStable
     };
   }
 
+  function importersTabIsActive() {
+    const control = findExactControl("Importers", "button, a, [role='button']");
+    const selected = Boolean(control && (
+      control.getAttribute("aria-selected") === "true" ||
+      control.getAttribute("aria-current") === "page" ||
+      control.classList.contains("active") ||
+      control.closest(".active, [aria-selected='true']")
+    ));
+    const body = normalizeText(textOf(document.body));
+    const listContext = body.includes("allimporters") && (
+      resultRowsWithNumbers().length > 0 ||
+      pageShowsRecordNotFound() ||
+      visibleSelectorExists(".G-table-body, [role='table'], .result-G-table")
+    );
+
+    return selected || listContext;
+  }
+
   async function selectImportersTab() {
     const result = clickExactControl("Importers", "button, a, [role='button']");
-    const resultsStable = result.ok ? await waitForResultsStable(12000) : { ok: false, reason: "Importers tab not clicked" };
+    const active = result.ok
+      ? await waitUntil(() => importersTabIsActive(), 8000, 300, 300)
+      : false;
+    const resultsStable = active
+      ? await waitForResultsStable(12000)
+      : { ok: false, reason: "Importers tab did not become active" };
 
     return {
       ...result,
-      ok: result.ok,
+      ok: Boolean(result.ok && active),
+      reason: result.ok && active ? "" : (result.reason || "Importers tab did not become active."),
+      active: Boolean(active),
       resultsStable
     };
   }
@@ -1548,16 +1948,32 @@
     const hsCode = String(options.hsCode || "").trim();
     const minValue = String(options.minValue || "50000").trim();
     const maxValue = String(options.maxValue || "5000000").trim();
+    const requestedCriteria = {
+      country: "Global",
+      dataType: "Import-Global",
+      tab: "Importers",
+      period: "Last 1 year",
+      hsCode,
+      totalValueUsd: {
+        min: minValue,
+        max: maxValue
+      },
+      removeUnknownExporter: true
+    };
+    const failStage = (stage, result, completed = {}) => ({
+      ok: false,
+      failedStage: stage,
+      reason: result?.reason || `${stage} failed`,
+      criteria: requestedCriteria,
+      ...completed,
+      [stage]: result
+    });
 
     await postLocalGuiLog("[조건 초기화] 기존 검색 조건을 모두 제거합니다.", "조건 초기화");
     const resetCriteria = await clearAllAppliedCriteria();
     if (!resetCriteria.ok) {
       await postLocalGuiLog("[조건 초기화 실패] 기존 검색 조건을 제거하지 못했습니다.", "조건 초기화 실패");
-      return {
-        ok: false,
-        reason: resetCriteria.reason,
-        resetCriteria
-      };
+      return failStage("resetCriteria", resetCriteria);
     }
     await postLocalGuiLog("[조건 초기화 완료] 새 검색 조건을 적용합니다.", "조건 초기화 완료");
     await postLocalGuiLog(
@@ -1566,17 +1982,62 @@
     );
 
     const dates = await setLastOneYearDates();
+    if (!dates.ok) {
+      return failStage("dates", dates, { resetCriteria });
+    }
+
     await humanPause(700, 1200);
     const hsFilter = await applyHsCodeFilter(hsCode);
+    if (!hsFilter.ok) {
+      return failStage("hsFilter", hsFilter, { resetCriteria, dates });
+    }
+
     await humanPause(700, 1200);
     const applyHs = clickExactControl("Apply", "button, [role='button']");
+    if (!applyHs.ok) {
+      return failStage("applyHs", applyHs, { resetCriteria, dates, hsFilter });
+    }
+
     const applyResultsStable = applyHs.ok ? await waitForResultsStable(12000) : { ok: false, reason: "Apply button not clicked" };
 
     const importersTab = await selectImportersTab();
+    if (!importersTab.ok) {
+      return failStage("importersTab", importersTab, {
+        resetCriteria,
+        dates,
+        hsFilter,
+        applyHs,
+        applyResultsStable
+      });
+    }
+
     await humanPause(700, 1200);
     const totalValue = await applyTotalValueRange(minValue, maxValue);
+    if (!totalValue.ok) {
+      return failStage("totalValue", totalValue, {
+        resetCriteria,
+        dates,
+        hsFilter,
+        applyHs,
+        applyResultsStable,
+        importersTab
+      });
+    }
+
     await humanPause(700, 1200);
     const removeUnknownExporter = await enableRemoveUnknownExporter();
+    if (!removeUnknownExporter.ok) {
+      return failStage("removeUnknownExporter", removeUnknownExporter, {
+        resetCriteria,
+        dates,
+        hsFilter,
+        applyHs,
+        applyResultsStable,
+        importersTab,
+        totalValue
+      });
+    }
+
     await waitForImporterCandidates(8000);
     await humanPause(900, 1600);
     const verification = await verifyAppliedCriteria({
@@ -1585,31 +2046,11 @@
       maxValue,
       dateRange: dates.range
     });
-    const stageFailureReason = [
-      resetCriteria,
-      dates,
-      hsFilter,
-      applyHs,
-      importersTab,
-      totalValue,
-      removeUnknownExporter
-    ].find((result) => result && result.ok === false)?.reason || "";
 
     return {
-      ok: resetCriteria.ok && dates.ok && hsFilter.ok && applyHs.ok && importersTab.ok && totalValue.ok && removeUnknownExporter.ok && verification.ok,
-      reason: stageFailureReason || (verification.ok ? "" : "Applied search criteria did not match the requested values."),
-      criteria: {
-        country: "Global",
-        dataType: "Import-Global",
-        tab: "Importers",
-        period: "Last 1 year",
-        hsCode,
-        totalValueUsd: {
-          min: minValue,
-          max: maxValue
-        },
-        removeUnknownExporter: true
-      },
+      ok: verification.ok,
+      reason: verification.ok ? "" : "Applied search criteria did not match the requested values.",
+      criteria: requestedCriteria,
       resetCriteria,
       dates,
       hsFilter,
@@ -1667,10 +2108,25 @@
       "[조건 설정 중단] 검색 조건을 3회 확인했지만 요청값과 일치하지 않습니다.",
       "조건 설정 실패"
     );
+    const diagnosis = await diagnoseDomFailure(
+      "criteria",
+      "apply-search-criteria",
+      lastResult?.reason || "Applied search criteria did not match after 3 attempts.",
+      {
+        attempts,
+        requested: {
+          hsCode: options.hsCode,
+          minValue: options.minValue,
+          maxValue: options.maxValue
+        }
+      }
+    );
     return {
       ...(lastResult || { ok: false }),
       ok: false,
-      reason: lastResult?.reason || "Applied search criteria did not match after 3 attempts.",
+      reason: diagnosis.reason,
+      domChangeSuspected: diagnosis.domChangeSuspected,
+      domAssessment: diagnosis.domAssessment,
       attempts
     };
   }
@@ -1699,8 +2155,21 @@
 
   function getImporterCandidates() {
     const seen = new Set();
+    const primary = Array.from(document.querySelectorAll(".dot-blue.ellipsis-text[title]"));
+    const rowBased = resultRowsWithNumbers().map((row) => {
+      const cells = Array.from(row.querySelectorAll(":scope > [role='cell'], :scope > td, :scope > .td"));
+      const companyCell = cells[1] || null;
+      if (!companyCell) {
+        return null;
+      }
 
-    return Array.from(document.querySelectorAll(".dot-blue.ellipsis-text[title]"))
+      return companyCell.querySelector(".ellipsis-text[title], a[title], span[title], [title]") ||
+        companyCell.querySelector("a, button, span") ||
+        companyCell;
+    }).filter(Boolean);
+    const source = Array.from(new Set([...primary, ...rowBased]));
+
+    return source
       .filter((element) => {
         if (isHelperElement(element)) {
           return false;
@@ -2150,9 +2619,23 @@
           continue;
         }
 
+        const diagnosis = await diagnoseDomFailure(
+          "pagination",
+          "find-page-navigation-control",
+          `Page ${target} control not found.`,
+          {
+            targetPage: target,
+            currentPage,
+            requirePagination: true,
+            expectNext: target > (currentPage || 0),
+            attempts
+          }
+        );
         return {
           ok: false,
-          reason: `Page ${target} control not found.`,
+          reason: diagnosis.reason,
+          domChangeSuspected: diagnosis.domChangeSuspected,
+          domAssessment: diagnosis.domAssessment,
           targetPage: target,
           currentPage,
           currentSnapshot: listPageSnapshot(),
@@ -2218,9 +2701,22 @@
         attempts[attempts.length - 1].final = finalSnapshot;
 
         if (!candidates?.length) {
+          const diagnosis = await diagnoseDomFailure(
+            "pagination",
+            "wait-target-page-rows",
+            `Importer page ${target} opened but expected rows did not become ready.`,
+            {
+              targetPage: target,
+              expectedRowNumber: Number.isFinite(expectedRow) ? expectedRow : null,
+              requirePagination: true,
+              attempts
+            }
+          );
           return {
             ok: false,
-            reason: `Importer page ${target} opened but expected rows did not become ready.`,
+            reason: diagnosis.reason,
+            domChangeSuspected: diagnosis.domChangeSuspected,
+            domAssessment: diagnosis.domAssessment,
             targetPage: target,
             expectedRowNumber: Number.isFinite(expectedRow) ? expectedRow : null,
             currentPage: finalSnapshot.page,
@@ -2368,11 +2864,28 @@
 
     const after = listPageSnapshot();
     const exhaustedRecordNotFoundRecovery = recordNotFoundRecoveries >= MAX_RECORD_NOT_FOUND_RECOVERY && pageShowsRecordNotFound();
+    const fallbackReason = exhaustedRecordNotFoundRecovery
+      ? `Importer list still showed record not found after ${MAX_RECORD_NOT_FOUND_RECOVERY} recovery attempts.`
+      : "Importer list did not change after clicking next page.";
+    const diagnosis = exhaustedRecordNotFoundRecovery
+      ? { reason: fallbackReason, domChangeSuspected: false, domAssessment: null }
+      : await diagnoseDomFailure(
+          "pagination",
+          "move-next-page",
+          fallbackReason,
+          {
+            requirePagination: true,
+            expectNext: true,
+            attempts,
+            before,
+            after
+          }
+        );
     return {
       ok: false,
-      reason: exhaustedRecordNotFoundRecovery
-        ? `Importer list still showed record not found after ${MAX_RECORD_NOT_FOUND_RECOVERY} recovery attempts.`
-        : "Importer list did not change after clicking next page.",
+      reason: diagnosis.reason,
+      domChangeSuspected: diagnosis.domChangeSuspected,
+      domAssessment: diagnosis.domAssessment,
       beforeSignature: before.signature,
       afterSignature: after.signature,
       beforeUrl: before.url,
@@ -2685,6 +3198,35 @@
 
     const profileUrl = location.href;
     const ready = await waitForCompanyProfileReady(45000);
+    if (ready.stopped) {
+      return {
+        stopped: true,
+        reason: "Stopped by GUI request.",
+        identity,
+        profileUrl
+      };
+    }
+    if (!ready.ready && !ready.stopped) {
+      await reloadIncompleteProfile(state, {
+        companyName: identity.listCompanyName,
+        rowNumber: identity.rowNumber
+      });
+    }
+    if (ready.ready) {
+      clearProfileLoadRecovery(state);
+    }
+    const diagnosis = ready.ready
+      ? null
+      : await diagnoseDomFailure(
+          "profile",
+          "wait-resume-anchor-profile",
+          "Resume anchor profile did not finish rendering.",
+          {
+            listCompanyName: identity.listCompanyName,
+            rowNumber: identity.rowNumber,
+            profileUrl
+          }
+        );
     const overview = ready.ready ? extractOverviewProfile() : null;
     const profileCompanyCandidates = overview?.raw?.profileCompanyCandidates || [];
     const matchedProfileCompanyName = profileCompanyCandidates.find((candidate) => {
@@ -2710,6 +3252,9 @@
       profileCompanyKey,
       profileCompanyCandidates,
       ready,
+      reason: diagnosis?.reason || "",
+      domChangeSuspected: Boolean(diagnosis?.domChangeSuspected),
+      domAssessment: diagnosis?.domAssessment || null,
       candidates
     };
   }
@@ -2725,6 +3270,30 @@
         reason: "Stopped by GUI request."
       };
     }
+
+    if (!profileReady.ready) {
+      await reloadIncompleteProfile(state, {
+        companyName: checking.listCompanyName || state.resumeAnchorBuyerName,
+        rowNumber: checking.rowNumber || null
+      });
+      const diagnosis = await diagnoseDomFailure(
+        "profile",
+        "wait-resumed-anchor-profile",
+        "Resume anchor profile did not finish rendering.",
+        {
+          checking,
+          profileUrl
+        }
+      );
+      state.active = false;
+      state.summary.ok = false;
+      state.summary.reason = diagnosis.reason;
+      state.summary.diagnostics.domAssessment = diagnosis.domAssessment;
+      writeCollectionState(state);
+      return resultFromCollectionState(state);
+    }
+
+    clearProfileLoadRecovery(state);
 
     const overview = profileReady.ready ? extractOverviewProfile() : null;
     const profileCompanyCandidates = overview?.raw?.profileCompanyCandidates || [];
@@ -2930,6 +3499,15 @@
           state.summary.reason = inspected.reason;
           writeCollectionState(state);
           return resultFromCollectionState(state, { stopped: true, reason: inspected.reason });
+        }
+
+        if (inspected.domChangeSuspected) {
+          state.active = false;
+          state.summary.ok = false;
+          state.summary.reason = inspected.reason;
+          state.summary.diagnostics.domAssessment = inspected.domAssessment;
+          writeCollectionState(state);
+          return resultFromCollectionState(state);
         }
 
         await postLocalGuiLog(
@@ -3149,20 +3727,38 @@
 
     await humanPause("navigation");
     clickElement(commodities);
-    await waitUntil(() => {
+    const commoditiesReady = await waitUntil(() => {
       return findExactControl("Import Commodities", "button, a, [role='button']") ||
         textOf(document.body).includes(hsCode);
     }, 15000, 500, 1000);
+
+    if (!commoditiesReady) {
+      return {
+        ok: false,
+        reason: "Commodities section did not open after clicking the tab"
+      };
+    }
 
     const importCommodities = findExactControl("Import Commodities", "button, a, [role='button']");
     if (importCommodities) {
       await humanPause("control");
       clickElement(importCommodities);
-      await humanPause(900, 1500);
     }
 
+    const contentReady = await waitUntil(() => {
+      const bodyText = textOf(document.body);
+      const normalized = normalizeText(bodyText);
+      const rows = parseCommodityRowsFromText(bodyText, "import");
+      return bodyText.includes(hsCode) ||
+        rows.length > 0 ||
+        normalized.includes("nodata") ||
+        normalized.includes("recordnotfound");
+    }, 15000, 500, 900);
+
     return {
-      ok: true
+      ok: Boolean(contentReady),
+      reason: contentReady ? "" : "Import Commodities content did not become ready",
+      importControlFound: Boolean(importCommodities)
     };
   }
 
@@ -3181,7 +3777,24 @@
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       const opened = await openImportCommodityTab(code);
       if (!opened.ok) {
-        return opened;
+        attempts.push({
+          attempt,
+          opened: false,
+          reason: opened.reason,
+          bodyTextSample: textOf(document.body).slice(0, 500)
+        });
+
+        if (attempt < 3) {
+          await humanPause(1200 * attempt, 1800 * attempt);
+          const overview = findExactControl("Overview", "a, button, [role='button']");
+          if (overview) {
+            clickElement(overview);
+            await humanPause(800, 1400);
+          }
+          continue;
+        }
+
+        break;
       }
 
       const parsed = await waitUntil(() => {
@@ -3237,11 +3850,24 @@
       }
     }
 
+    const diagnosis = await diagnoseDomFailure(
+      "commodity",
+      "parse-import-commodity-row",
+      "HS code row could not be parsed from Import Commodities after retries",
+      {
+        hsCode: code,
+        attempts,
+        parserFailed: true
+      }
+    );
+
     return {
       ok: false,
       hsCode: code,
       qualified: null,
-      reason: "HS code row could not be parsed from Import Commodities after retries",
+      reason: diagnosis.reason,
+      domChangeSuspected: diagnosis.domChangeSuspected,
+      domAssessment: diagnosis.domAssessment,
       attempts,
       bodyTextSample: textOf(document.body).slice(0, 1600)
     };
@@ -3421,9 +4047,12 @@
 
     await humanPause("navigation");
     clickElement(overview);
-    await humanPause(1200, 1800);
+    const profile = await waitUntil(() => {
+      const extracted = extractOverviewProfile();
+      return extracted.ok ? extracted : null;
+    }, 12000, 500, 700);
 
-    return extractOverviewProfile();
+    return profile || extractOverviewProfile();
   }
 
   function parseCountryRowsFromText(bodyText, mode) {
@@ -3461,8 +4090,10 @@
     return rows;
   }
 
-  async function scrapeCountryBlocks() {
-    const overview = await scrapeOverviewProfile();
+  async function scrapeCountryBlocks(existingOverview = null) {
+    const overview = existingOverview?.excelPinkBlock
+      ? existingOverview
+      : await scrapeOverviewProfile();
     const exportTurnover = overview.excelPinkBlock?.Annual_Export_Turnover ?? 0;
     const countries = findExactControl("Countries", "a, button, [role='button']");
 
@@ -3482,10 +4113,12 @@
     if (importCountriesButton) {
       await humanPause("control");
       clickElement(importCountriesButton);
-      await humanPause(800, 1400);
     }
 
-    const importRows = parseCountryRowsFromText(textOf(document.body), "import");
+    const importRows = await waitUntil(() => {
+      const rows = parseCountryRowsFromText(textOf(document.body), "import");
+      return rows.length ? rows : null;
+    }, 15000, 500, 700) || [];
     let exportRows = [];
     let exportSkipped = false;
     let exportReason = "";
@@ -3496,8 +4129,10 @@
       if (exportCountriesButton) {
         await humanPause("control");
         clickElement(exportCountriesButton);
-        await humanPause(900, 1500);
-        exportRows = parseCountryRowsFromText(textOf(document.body), "export");
+        exportRows = await waitUntil(() => {
+          const rows = parseCountryRowsFromText(textOf(document.body), "export");
+          return rows.length ? rows : null;
+        }, 15000, 500, 700) || [];
       } else {
         exportReason = "Export Countries tab not found";
       }
@@ -3564,8 +4199,10 @@
     return rows;
   }
 
-  async function scrapeCommodityBlocks() {
-    const overview = await scrapeOverviewProfile();
+  async function scrapeCommodityBlocks(existingOverview = null) {
+    const overview = existingOverview?.excelPinkBlock
+      ? existingOverview
+      : await scrapeOverviewProfile();
     const exportTurnover = overview.excelPinkBlock?.Annual_Export_Turnover ?? 0;
     const commodities = findExactControl("Commodities", "a, button, [role='button']");
 
@@ -3579,16 +4216,18 @@
 
     await humanPause("navigation");
     clickElement(commodities);
-    await humanPause(1200, 1800);
+    await waitUntil(() => findExactControl("Import Commodities", "button, a, [role='button']"), 15000, 500, 700);
 
     const importButton = findExactControl("Import Commodities", "button, a, [role='button']");
     if (importButton) {
       await humanPause("control");
       clickElement(importButton);
-      await humanPause(800, 1400);
     }
 
-    const importRows = parseCommodityRowsFromText(textOf(document.body), "import");
+    const importRows = await waitUntil(() => {
+      const rows = parseCommodityRowsFromText(textOf(document.body), "import");
+      return rows.length ? rows : null;
+    }, 15000, 500, 700) || [];
     let exportRows = [];
     let exportSkipped = false;
     let exportReason = "";
@@ -3599,8 +4238,10 @@
       if (exportButton) {
         await humanPause("control");
         clickElement(exportButton);
-        await humanPause(900, 1500);
-        exportRows = parseCommodityRowsFromText(textOf(document.body), "export");
+        exportRows = await waitUntil(() => {
+          const rows = parseCommodityRowsFromText(textOf(document.body), "export");
+          return rows.length ? rows : null;
+        }, 15000, 500, 700) || [];
       } else {
         exportReason = "Export Commodities tab not found";
       }
@@ -3659,15 +4300,13 @@
   }
 
   async function confirmLocalJsonDownload(fileName, buyerName, hsCode) {
-    const params = new URLSearchParams({
+    return postLocalGui("/download-confirm", {
       filename: fileName,
       buyer: buyerName || "",
       hsCode: hsCode || "",
       requireExcel: "1",
       timeout: "20"
     });
-
-    return fetchLocalGui(`/download-confirm?${params.toString()}`);
   }
 
   function dataCollectionFailureReason(data) {
@@ -3769,6 +4408,7 @@
         ok: false,
         skipped: false,
         downloaded: false,
+        fatal: Boolean(commodityValue.domChangeSuspected),
         reason: commodityValue.reason || "HS code import value percent could not be verified",
         hsCode: code,
         commodityValue,
@@ -3790,13 +4430,13 @@
       return stoppedAfterOverview;
     }
 
-    const countries = await scrapeCountryBlocks();
+    const countries = await scrapeCountryBlocks(overview);
     const stoppedAfterCountries = await abortIfGuiStopRequested();
     if (stoppedAfterCountries) {
       return stoppedAfterCountries;
     }
 
-    const commodities = await scrapeCommodityBlocks();
+    const commodities = await scrapeCommodityBlocks(overview);
     const stoppedAfterCommodities = await abortIfGuiStopRequested();
     if (stoppedAfterCommodities) {
       return stoppedAfterCommodities;
@@ -3832,6 +4472,23 @@
 
     if (!data.ok) {
       data.reason = dataCollectionFailureReason(data);
+      const screen = data.reason.includes("country") ? "country" :
+        data.reason.includes("commodity") ? "commodity" : "profile";
+      const diagnosis = await diagnoseDomFailure(
+        screen,
+        "collect-profile-data",
+        data.reason,
+        {
+          companyName,
+          hsCode: code,
+          parserFailed: data.reason.includes("rows were not parsed"),
+          diagnostics: data.diagnostics
+        }
+      );
+      data.reason = diagnosis.reason;
+      data.domChangeSuspected = diagnosis.domChangeSuspected;
+      data.domAssessment = diagnosis.domAssessment;
+      data.fatal = diagnosis.domChangeSuspected;
     }
 
     if (data.ok) {
@@ -3968,6 +4625,63 @@
     };
   }
 
+  function profileLoadRecoveryIdentity(state, context = {}) {
+    const checking = state?.summary?.diagnostics?.resumeAnchorChecking || {};
+    const rowNumber = context.rowNumber || state?.currentCompany?.rowNumber || checking.rowNumber || "";
+    const companyName = context.companyName || state?.currentCompany?.companyName || checking.listCompanyName || "company";
+    return `${state?.phase || "profile"}:${rowNumber}:${companyKeyFromName(companyName)}:${location.pathname}`;
+  }
+
+  async function reloadIncompleteProfile(state, context = {}) {
+    state.summary = state.summary || {};
+    state.summary.diagnostics = state.summary.diagnostics || {};
+    const identity = profileLoadRecoveryIdentity(state, context);
+    const previous = state.summary.diagnostics.profileLoadRecovery || {};
+    const previousAttempts = previous.identity === identity
+      ? Number.parseInt(previous.attempts, 10) || 0
+      : 0;
+
+    if (previousAttempts >= MAX_PROFILE_LOAD_RECOVERY) {
+      return {
+        reloading: false,
+        exhausted: true,
+        attempts: previousAttempts,
+        identity
+      };
+    }
+
+    const recovery = {
+      identity,
+      attempts: previousAttempts + 1,
+      maxAttempts: MAX_PROFILE_LOAD_RECOVERY,
+      companyName: context.companyName || state.currentCompany?.companyName || "company",
+      rowNumber: context.rowNumber || state.currentCompany?.rowNumber || null,
+      profileUrl: location.href,
+      requestedAt: new Date().toISOString()
+    };
+    state.summary.diagnostics.profileLoadRecovery = recovery;
+    writeCollectionState(state);
+    await postLocalGuiLog(
+      `[상세페이지 재시도] 회사 정보가 완전히 로드되지 않아 새로고침합니다. (${recovery.attempts}/${MAX_PROFILE_LOAD_RECOVERY})`,
+      "상세페이지 재시도"
+    );
+    await postLocalGuiRawLog({
+      type: "profile-load-reload",
+      recovery
+    });
+    location.reload();
+    return new Promise(() => {});
+  }
+
+  function clearProfileLoadRecovery(state) {
+    if (!state?.summary?.diagnostics?.profileLoadRecovery) {
+      return;
+    }
+
+    delete state.summary.diagnostics.profileLoadRecovery;
+    writeCollectionState(state);
+  }
+
   async function waitForCompanyProfileReady(timeoutMs = 45000) {
     let lastLength = 0;
     let stableCount = 0;
@@ -4052,16 +4766,43 @@
       }
 
       if (!profileReady.ready) {
-        await postLocalGuiLog(`오류 발생: ${listCompanyName} - 회사 상세정보 로딩이 끝나지 않았습니다.`);
+        await reloadIncompleteProfile(state, {
+          companyName: listCompanyName,
+          rowNumber: state.currentCompany?.rowNumber || null
+        });
+        const diagnosis = await diagnoseDomFailure(
+          "profile",
+          "wait-company-profile-ready",
+          "company profile did not finish rendering",
+          {
+            companyName: listCompanyName,
+            profileUrl,
+            timeoutMs: 45000
+          }
+        );
+        await postLocalGuiLog(`오류 발생: ${listCompanyName} - ${friendlyReason(diagnosis.reason)}`);
         state.summary.failed += 1;
         state.summary.companies.push({
           companyName: listCompanyName,
           status: "failed",
-          reason: "company profile did not finish rendering",
-          profileUrl
+          reason: diagnosis.reason,
+          profileUrl,
+          domChangeSuspected: diagnosis.domChangeSuspected,
+          domAssessment: diagnosis.domAssessment
         });
         await postLocalGuiBlankLine();
+
+        if (diagnosis.domChangeSuspected) {
+          state.active = false;
+          state.summary.ok = false;
+          state.summary.reason = diagnosis.reason;
+          state.summary.diagnostics.domAssessment = diagnosis.domAssessment;
+          state.summary.diagnostics.finishedAt = new Date().toISOString();
+          writeCollectionState(state);
+          return resultFromCollectionState(state);
+        }
       } else {
+        clearProfileLoadRecovery(state);
         const result = await collectExcelData(state.hsCode, listCompanyName);
         if (result.stopped) {
           state.active = false;
@@ -4185,9 +4926,20 @@
       candidates = await waitForImporterResultsReady(25000);
 
       if (!candidates.length) {
-        state.summary.reason = tabResult.ok
+        const fallbackReason = tabResult.ok
           ? "No importer candidates found after opening Importers tab."
           : "No importer candidates found and Importers tab could not be opened.";
+        const diagnosis = await diagnoseDomFailure(
+          "results",
+          "wait-importer-list",
+          fallbackReason,
+          {
+            tabResult,
+            waitTimeoutMs: 25000
+          }
+        );
+        state.summary.reason = diagnosis.reason;
+        state.summary.diagnostics.domAssessment = diagnosis.domAssessment;
         state.active = false;
         writeCollectionState(state);
         return resultFromCollectionState(state);
@@ -4279,7 +5031,19 @@
       }
 
       if (!target) {
-        state.summary.reason = "No target importer candidates found after moving to next page.";
+        const fallbackReason = "No target importer candidates found after moving to next page.";
+        const diagnosis = await diagnoseDomFailure(
+          "results",
+          "find-buyer-after-next-page",
+          fallbackReason,
+          {
+            requirePagination: true,
+            expectNext: false,
+            resumeStartRowNumber,
+            pagination: moved
+          }
+        );
+        state.summary.reason = diagnosis.reason;
         state.summary.diagnostics.afterNextPage = {
           signature: importerListSignature(),
           candidateCount: getImporterCandidates().length,
@@ -4289,6 +5053,7 @@
           candidates: importerCandidateSummary(getImporterCandidates()).slice(0, 20),
           pageTextSample: textOf(document.body).slice(0, 800)
         };
+        state.summary.diagnostics.domAssessment = diagnosis.domAssessment;
         state.active = false;
         await postLocalGuiLog(
           `No target buyer found after moving to the next page. Saved ${state.summary.qualifiedSaved}/${state.targetCount}.`,
@@ -4445,7 +5210,8 @@
     await humanPause(500, 900);
 
     return {
-      ok: true,
+      ok: Boolean(selected),
+      reason: selected ? "" : `selected value was not confirmed: ${optionTexts.join(", ")}`,
       selected,
       trigger: describeElement(trigger),
       option: describeElement(option)
@@ -4544,13 +5310,13 @@
     }
   }
 
-  async function postLocalGuiRawLog(payload) {
+  async function postLocalGui(path, payload = {}) {
     try {
-      const response = await fetch(`${LOCAL_GUI_URL}/raw-log`, {
+      const response = await fetch(`${LOCAL_GUI_URL}${path}`, {
         method: "POST",
         cache: "no-store",
         headers: {
-          "Content-Type": "text/plain;charset=UTF-8"
+          "Content-Type": "application/json;charset=UTF-8"
         },
         body: JSON.stringify(payload)
       });
@@ -4564,9 +5330,14 @@
     } catch (error) {
       return {
         ok: false,
-        reason: error?.message || String(error)
+        reason: error?.message || String(error),
+        url: `${LOCAL_GUI_URL}${path}`
       };
     }
+  }
+
+  async function postLocalGuiRawLog(payload) {
+    return postLocalGui("/raw-log", payload);
   }
 
   async function checkLocalGui() {
@@ -4615,21 +5386,19 @@
   }
 
   async function completeLocalGuiQueueTask(collection, task = null) {
-    const params = new URLSearchParams({
+    return postLocalGui("/queue/complete", {
       taskId: collection?.queueTaskId || task?.queueTaskId || "",
       saved: String(collection?.qualifiedSaved ?? ""),
       visited: String(collection?.visited ?? ""),
       reason: collection?.reason || ""
     });
-    return fetchLocalGui(`/queue/complete?${params.toString()}`);
   }
 
   async function failLocalGuiQueueTask(reason, task = null) {
-    const params = new URLSearchParams({
+    return postLocalGui("/queue/fail", {
       taskId: task?.queueTaskId || "",
       reason: reason || "Queue automation failed."
     });
-    return fetchLocalGui(`/queue/fail?${params.toString()}`);
   }
 
   async function reportFinishedCollectionToGui(collection, source = "auto-resume") {
@@ -4688,8 +5457,15 @@
     };
 
     if (collection.ok && report.ok && report.data && report.data.done === false) {
-      await postLocalGuiLog("다음 작업을 이어서 시작합니다.", "Running task");
-      await humanPause("task");
+      const nextTaskWait = await waitBeforeNextQueueTask();
+      if (nextTaskWait.stopped) {
+        output.nextRun = {
+          ok: false,
+          stopped: true,
+          reason: nextTaskWait.reason
+        };
+        return output;
+      }
       output.nextRun = await startLocalGuiQueueAutomation();
     }
 
@@ -4697,11 +5473,10 @@
   }
 
   async function postLocalGuiLog(message, status = "") {
-    const params = new URLSearchParams({
+    return postLocalGui("/log", {
       message: message || "",
       status: status || ""
     });
-    return fetchLocalGui(`/log?${params.toString()}`);
   }
 
   async function postLocalGuiBlankLine() {
@@ -4709,16 +5484,15 @@
   }
 
   async function getLocalGuiCommand() {
-    return fetchLocalGui("/command");
+    return postLocalGui("/command", {});
   }
 
   async function postLocalGuiCommandResult(command, ok, message) {
-    const params = new URLSearchParams({
+    return postLocalGui("/command-result", {
       id: String(command?.id || ""),
       ok: ok ? "true" : "false",
       message: message || ""
     });
-    return fetchLocalGui(`/command-result?${params.toString()}`);
   }
 
   async function getLocalGuiStopRequested() {
@@ -4856,6 +5630,9 @@
 
   function friendlyReason(reason = "") {
     const text = String(reason || "");
+    if (text.includes(DOM_STRUCTURE_ERROR_PREFIX)) {
+      return "Export Genius 홈페이지 구조가 변경된 것으로 의심됩니다. 자동화를 중단하고 관리자에게 문의해 주세요.";
+    }
     if (text.includes("overview required fields missing")) {
       return "회사 기본 정보를 읽지 못했습니다.";
     }
@@ -4944,7 +5721,9 @@
       await postLocalGuiLog(
         `목표: ${task.targetCount}개 | 기존 저장: ${task.alreadySaved || 0}개 | 추가 수집: ${task.remainingCount || task.targetCount}개`
       );
-      await humanPause("task");
+      if (results.length === 0) {
+        await humanPause("task");
+      }
       const run = await startLocalGuiTaskAutomation();
       results.push({
         queuePosition: current.data?.queuePosition,
@@ -4988,6 +5767,17 @@
             task,
             completed
           });
+          const nextTaskWait = await waitBeforeNextQueueTask();
+          if (nextTaskWait.stopped) {
+            clearCollectionState();
+            await postLocalGuiLog("사용자 요청으로 작업을 중단했습니다.", "중단");
+            return {
+              ok: false,
+              stopped: true,
+              reason: nextTaskWait.reason,
+              results
+            };
+          }
           continue;
         }
 
@@ -5014,8 +5804,17 @@
       }
 
       await postLocalGuiBlankLine();
-      await postLocalGuiLog("다음 작업을 준비합니다.", "작업 준비");
-      await humanPause("task");
+      const nextTaskWait = await waitBeforeNextQueueTask();
+      if (nextTaskWait.stopped) {
+        clearCollectionState();
+        await postLocalGuiLog("사용자 요청으로 작업을 중단했습니다.", "중단");
+        return {
+          ok: false,
+          stopped: true,
+          reason: nextTaskWait.reason,
+          results
+        };
+      }
     }
 
     await failLocalGuiQueueTask("Queue guard limit reached.", activeTask);
